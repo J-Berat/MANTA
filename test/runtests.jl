@@ -82,6 +82,7 @@ end
 
     # Expect inline LaTeX (e.g., \\, for thin space)
     @test occursin("\\,", raw_s) || occursin("\\,", raw_t1) || occursin("\\,", raw_t2)
+    @test occursin("intensity", lowercase(raw_s))
 end
 
 @testset "helpers: io" begin

@@ -113,6 +113,41 @@ function carta(
 
     gauss_on = Observable(false)
     sigma    = Observable(1.5f0)
+    show_crosshair = Observable(true)
+    show_marker    = Observable(true)
+    show_grid      = Observable(false)
+    zoom_drag_active = Observable(false)
+    zoom_drag_start  = Observable(Point2f(NaN32, NaN32))
+    zoom_drag_end    = Observable(Point2f(NaN32, NaN32))
+
+    ui_accent = RGBf(0.12, 0.45, 0.82)
+    ui_accent_dim = RGBf(0.50, 0.67, 0.89)
+    ui_track = RGBf(0.84, 0.88, 0.93)
+    ui_panel_bg = RGBf(0.96, 0.97, 0.99)
+    ui_panel_border = RGBf(0.79, 0.83, 0.90)
+
+    style_checkbox!(chk) = begin
+        chk.size[] = 22
+        chk.checkmarksize[] = 0.62
+        chk.roundness[] = 0.45
+        chk.checkboxstrokewidth[] = 1.5
+        chk.checkboxcolor_checked[] = ui_accent
+        chk.checkboxcolor_unchecked[] = RGBf(0.93, 0.94, 0.97)
+        chk.checkboxstrokecolor_checked[] = ui_accent
+        chk.checkboxstrokecolor_unchecked[] = RGBf(0.65, 0.70, 0.78)
+        chk.checkmarkcolor_checked[] = :white
+        chk.checkmarkcolor_unchecked[] = RGBf(0.65, 0.70, 0.78)
+        chk
+    end
+
+    style_slider!(sl) = begin
+        sl.height[] = 18
+        sl.linewidth[] = 7
+        sl.color_active[] = ui_accent
+        sl.color_active_dimmed[] = ui_accent_dim
+        sl.color_inactive[] = ui_track
+        sl
+    end
 
     slice_proc = lift(slice_raw, gauss_on, sigma) do s, on, σ
         if on && σ > 0
@@ -163,7 +198,7 @@ function carta(
         end
     end
 
-    spec_x_axes = (collect(1:siz[1]), collect(1:siz[2]), collect(1:siz[3]))
+    spec_x_axes = (collect(0:(siz[1] - 1)), collect(0:(siz[2] - 1)), collect(0:(siz[3] - 1)))
     spec_y_buf  = Vector{Float32}(undef, siz[3])
     @views copyto!(spec_y_buf, data[1, 1, :])
     spec_x_raw  = Observable(spec_x_axes[3])
@@ -183,6 +218,7 @@ function carta(
     main_grid = fig[1, 1] = GridLayout()
     # Image + colorbar
     img_grid  = main_grid[1, 1] = GridLayout()
+    colgap!(img_grid, 0)
 
     ax_img = Axis(
         img_grid[1, 1];
@@ -194,19 +230,58 @@ function carta(
 
     uv_point = Observable(Point2f(1, 1))
     hm = heatmap!(ax_img, slice_disp; colormap = cm_obs, colorrange = clims_safe)
-    scatter!(ax_img, lift(p -> [p], uv_point); markersize = 10)
+    crosshair_segments = lift(axis, u_idx, v_idx, show_crosshair) do a, u, v, enabled
+        enabled || return Point2f[]
+        u_max, v_max = slice_dims(a)
+        Point2f[
+            Point2f(1, u), Point2f(v_max, u),
+            Point2f(v, 1), Point2f(v, u_max),
+        ]
+    end
+    zoom_box_segments = lift(zoom_drag_active, zoom_drag_start, zoom_drag_end) do active, p0, p1
+        active || return Point2f[]
+        if !(isfinite(p0[1]) && isfinite(p0[2]) && isfinite(p1[1]) && isfinite(p1[2]))
+            return Point2f[]
+        end
+        x0, y0 = p0
+        x1, y1 = p1
+        Point2f[
+            Point2f(x0, y0), Point2f(x1, y0),
+            Point2f(x1, y0), Point2f(x1, y1),
+            Point2f(x1, y1), Point2f(x0, y1),
+            Point2f(x0, y1), Point2f(x0, y0),
+        ]
+    end
+    linesegments!(ax_img, crosshair_segments; color = (:white, 0.9), linewidth = 1.6, linestyle = :dot)
+    linesegments!(ax_img, zoom_box_segments; color = (ui_accent, 0.95), linewidth = 2.0, linestyle = :dash)
+    marker_points = lift(uv_point, show_marker) do p, enabled
+        enabled ? Point2f[p] : Point2f[]
+    end
+    scatter!(ax_img, marker_points; markersize = 10)
 
     # Colorbar linked to plot; tellheight=false avoids layout feedback loops
     Colorbar(img_grid[1, 2], hm; label = L"\text{intensity}", width = 20, tellheight = false)
 
     # Info + spectrum
     spec_grid = main_grid[1, 2] = GridLayout()
+    info_panel = spec_grid[1, 1] = GridLayout(; alignmode = Outside())
+    Box(
+        info_panel[1, 1];
+        color = RGBf(0.965, 0.975, 0.99),
+        strokecolor = RGBf(0.76, 0.82, 0.9),
+        strokewidth = 1.2,
+        cornerradius = 10,
+        z = -5,
+    )
     lab_info = Label(
-        spec_grid[1, 1];
+        info_panel[1, 1];
         text      = make_info_tex(1, 1, 1, 1, 1, 0f0),
         halign    = :left,
-        valign    = :top,
-        fontsize  = 14,
+        valign    = :center,
+        fontsize  = 16,
+        color     = RGBf(0.10, 0.16, 0.28),
+        padding   = (12, 12, 10, 10),
+        lineheight = 1.15,
         tellwidth = false,
     )
 
@@ -219,6 +294,10 @@ function carta(
         height = 400,
     )
     lines!(ax_spec, spec_x_raw, spec_y_disp)
+    ax_img.xgridvisible[] = show_grid[]
+    ax_img.ygridvisible[] = show_grid[]
+    ax_spec.xgridvisible[] = show_grid[]
+    ax_spec.ygridvisible[] = show_grid[]
 
     # Controls
     img_ctrl_grid  = main_grid[2, 1] = GridLayout(; alignmode = Outside(), tellwidth = false, tellheight = false)
@@ -237,12 +316,9 @@ function carta(
     Label(im_row1[1, 3], text = L"\text{Spectrum scale}", halign = :left, tellwidth = false)
     spec_scale_menu = Menu(im_row1[1, 4]; options = ["lin", "log10", "ln"], prompt = "lin", width = 60)
 
-    invert_chk = Checkbox(im_row1[1, 5])
-    Label(im_row1[1, 6], text = L"\text{Invert colormap}", halign = :left, tellwidth = false)
+    reset_zoom_btn = Button(im_row1[1, 5]; label = "Reset zoom", width = 96, height = 26)
 
-    reset_zoom_btn = Button(im_row1[1, 7]; label = "Reset zoom", width = 96, height = 26)
-
-    foreach(c -> colsize!(im_row1, c, Auto()), 1:7)
+    foreach(c -> colsize!(im_row1, c, Auto()), 1:5)
 
     # Image controls (row2)
     im_row2 = img_ctrl_grid[2, 1:2] = GridLayout(; alignmode = Outside())
@@ -261,6 +337,7 @@ function carta(
     # Image controls (row3)
     im_row3 = img_ctrl_grid[3, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row3, 6)
+    Box(im_row3[1, 1:8]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
 
     Label(im_row3[1, 1], text = L"\text{GIF indices}", halign = :left, tellwidth = false)
     start_box = Textbox(im_row3[1, 2]; placeholder = "start", width = 70, height = 26)
@@ -295,6 +372,7 @@ function carta(
     # Spectrum controls moved under the image controls for easier access
     im_row5 = img_ctrl_grid[5, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row5, 6)
+    Box(im_row5[1, 1:5]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
 
     Label(im_row5[1, 1], text = L"\text{Slice axis}", halign = :left, tellwidth = false)
     axes_labels = ["dim1 (x)", "dim2 (y)", "dim3 (z)"]
@@ -313,22 +391,54 @@ function carta(
 
     im_row6 = img_ctrl_grid[6, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row6, 6)
+    Box(im_row6[1, 1:7]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
 
-    Label(im_row6[1, 1], text = L"\text{Gaussian filter}", halign = :left, tellwidth = false)
-    gauss_chk   = Checkbox(im_row6[1, 2])
+    Label(im_row6[1, 1], text = L"\text{Display options}", halign = :left, tellwidth = false)
+    invert_chk = Checkbox(im_row6[1, 2])
+    Label(im_row6[1, 3], text = L"\text{Invert colormap}", halign = :left, tellwidth = false)
+    gauss_chk = Checkbox(im_row6[1, 4])
+    Label(im_row6[1, 5], text = L"\text{Gaussian filter}", halign = :left, tellwidth = false)
     sigma_label = Label(
-        im_row6[1, 3];
+        im_row6[1, 6];
         text      = latexstring("\\sigma = 1.5\\,\\text{px}"),
         fontsize  = 12,
         halign    = :left,
         tellwidth = false,
     )
 
-    sigma_slider = Slider(im_row6[1, 4]; range = LinRange(0, 10, 101), startvalue = 1.5, width = 200, height = 10)
-    foreach(c -> colsize!(im_row6, c, Auto()), 1:4)
+    sigma_slider = Slider(im_row6[1, 7]; range = LinRange(0, 10, 101), startvalue = 1.5, width = 200, height = 10)
+    foreach(c -> colsize!(im_row6, c, Auto()), 1:7)
+
+    im_row7 = img_ctrl_grid[7, 1:2] = GridLayout(; alignmode = Outside())
+    colgap!(im_row7, 6)
+    Box(im_row7[1, 1:7]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
+
+    Label(im_row7[1, 1], text = L"\text{Overlay toggles}", halign = :left, tellwidth = false)
+    crosshair_chk = Checkbox(im_row7[1, 2])
+    Label(im_row7[1, 3], text = L"\text{Crosshair}", halign = :left, tellwidth = false)
+    marker_chk = Checkbox(im_row7[1, 4])
+    Label(im_row7[1, 5], text = L"\text{Selected point}", halign = :left, tellwidth = false)
+    grid_chk = Checkbox(im_row7[1, 6])
+    Label(im_row7[1, 7], text = L"\text{Grid}", halign = :left, tellwidth = false)
+    foreach(c -> colsize!(im_row7, c, Auto()), 1:7)
+
+    style_checkbox!(pingpong_chk)
+    style_checkbox!(invert_chk)
+    style_checkbox!(gauss_chk)
+    style_checkbox!(crosshair_chk)
+    style_checkbox!(marker_chk)
+    style_checkbox!(grid_chk)
+    style_slider!(slice_slider)
+    style_slider!(sigma_slider)
+
+    invert_chk.checked[] = invert_cmap[]
+    gauss_chk.checked[] = gauss_on[]
+    crosshair_chk.checked[] = show_crosshair[]
+    marker_chk.checked[] = show_marker[]
+    grid_chk.checked[] = show_grid[]
     main_grid[3, 1:2] = Label(
         main_grid[3, 1:2];
-        text      = "Shortcuts: arrow keys move the crosshair, mouse click picks a voxel, press 'i' to invert the colormap.",
+        text      = "Shortcuts: arrow keys move the crosshair, left click picks a voxel, right-drag draws a zoom box, press 'i' to invert the colormap.",
         halign    = :left,
         tellwidth = false,
     )
@@ -380,10 +490,13 @@ function carta(
             @views copyto!(spec_y_buf, data[i_idx[], j_idx[], :])
         end
         spec_y_raw[] = spec_y_buf
+        x_max = Float32(max(0, length(spec_y_buf) - 1))
         if use_manual[]
             vmin_, vmax_ = clims_manual[]; limits!(ax_spec, nothing, nothing, vmin_, vmax_)
+            xlims!(ax_spec, 0f0, x_max)
         else
             autolimits!(ax_spec)
+            xlims!(ax_spec, 0f0, x_max)
         end
     end
 
@@ -397,10 +510,13 @@ function carta(
     end
 
     on(spec_scale_mode) do _
+        x_max = Float32(max(0, length(spec_y_buf) - 1))
         if use_manual[]
             vmin_, vmax_ = clims_manual[]; limits!(ax_spec, nothing, nothing, vmin_, vmax_)
+            xlims!(ax_spec, 0f0, x_max)
         else
             autolimits!(ax_spec)
+            xlims!(ax_spec, 0f0, x_max)
         end
     end
 
@@ -450,6 +566,22 @@ function carta(
         refresh_spectrum!()
     end
 
+    on(crosshair_chk.checked) do v
+        show_crosshair[] = v
+    end
+
+    on(marker_chk.checked) do v
+        show_marker[] = v
+    end
+
+    on(grid_chk.checked) do v
+        show_grid[] = v
+        ax_img.xgridvisible[] = v
+        ax_img.ygridvisible[] = v
+        ax_spec.xgridvisible[] = v
+        ax_spec.ygridvisible[] = v
+    end
+
     on(sigma_slider.value) do v
         sigma[] = Float32(v)
         sigma_label.text[] = latexstring("\\sigma = $(round(v; digits = 2))\\,\\text{px}")
@@ -468,11 +600,13 @@ function carta(
             clims_manual[] = parsed_clims
             use_manual[] = true
             limits!(ax_spec, nothing, nothing, first(parsed_clims), last(parsed_clims))
+            xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
             set_box_text!(clim_min_box, string(first(parsed_clims)))
             set_box_text!(clim_max_box, string(last(parsed_clims)))
         else
             use_manual[] = false
             autolimits!(ax_spec)
+            xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
         end
     end
 
@@ -501,7 +635,44 @@ function carta(
 
     # Mouse pick
     on(events(ax_img).mousebutton) do ev
-        if ev.button == Mouse.left && ev.action == Mouse.press
+        if ev.button == Mouse.right && ev.action == Mouse.press
+            p = mouseposition(ax_img)
+            if any(isnan, p)
+                return
+            end
+            zoom_drag_start[] = Point2f(p[1], p[2])
+            zoom_drag_end[] = Point2f(p[1], p[2])
+            zoom_drag_active[] = true
+            set_status!("Zoom box: right-drag and release to apply.")
+            return
+        elseif ev.button == Mouse.right && ev.action == Mouse.release
+            if !zoom_drag_active[]
+                return
+            end
+            p = mouseposition(ax_img)
+            if !any(isnan, p)
+                zoom_drag_end[] = Point2f(p[1], p[2])
+            end
+            p0 = zoom_drag_start[]
+            p1 = zoom_drag_end[]
+            zoom_drag_active[] = false
+            zoom_drag_start[] = Point2f(NaN32, NaN32)
+            zoom_drag_end[] = Point2f(NaN32, NaN32)
+            if !(isfinite(p0[1]) && isfinite(p0[2]) && isfinite(p1[1]) && isfinite(p1[2]))
+                return
+            end
+            x0, y0 = p0
+            x1, y1 = p1
+            xmin, xmax = minmax(x0, x1)
+            ymin, ymax = minmax(y0, y1)
+            if abs(xmax - xmin) < 1e-3 || abs(ymax - ymin) < 1e-3
+                set_status!("Zoom canceled: draw a larger rectangle.")
+                return
+            end
+            limits!(ax_img, xmin, xmax, ymin, ymax)
+            set_status!("Zoom applied.")
+            return
+        elseif ev.button == Mouse.left && ev.action == Mouse.press
             p = mouseposition(ax_img)
             if any(isnan, p)
                 return
@@ -514,6 +685,12 @@ function carta(
             i_idx[] = clamp(ii, 1, siz[1]); j_idx[] = clamp(jj, 1, siz[2]); k_idx[] = clamp(kk, 1, siz[3])
             refresh_labels!(); refresh_spectrum!()
             uv_point[] = Point2f(v, u)
+        end
+    end
+
+    on(events(ax_img).mouseposition) do p
+        if zoom_drag_active[] && !any(isnan, p)
+            zoom_drag_end[] = Point2f(p[1], p[2])
         end
     end
 
@@ -539,6 +716,9 @@ function carta(
         "spec_scale" => String(spec_scale_mode[]),
         "colormap" => String(cmap_name[]),
         "invert_colormap" => invert_cmap[],
+        "show_crosshair" => show_crosshair[],
+        "show_marker" => show_marker[],
+        "show_grid" => show_grid[],
         "use_manual_clims" => use_manual[],
         "clim_min" => use_manual[] ? first(clims_manual[]) : first(clims_auto[]),
         "clim_max" => use_manual[] ? last(clims_manual[]) : last(clims_auto[]),
@@ -598,6 +778,10 @@ function carta(
             invert_val = Bool(get(st, "invert_colormap", invert_cmap[]))
             invert_chk.checked[] = invert_val
 
+            crosshair_chk.checked[] = Bool(get(st, "show_crosshair", show_crosshair[]))
+            marker_chk.checked[] = Bool(get(st, "show_marker", show_marker[]))
+            grid_chk.checked[] = Bool(get(st, "show_grid", show_grid[]))
+
             use_manual_val = Bool(get(st, "use_manual_clims", use_manual[]))
             if use_manual_val
                 cmin = Float32(get(st, "clim_min", first(clims_manual[])))
@@ -611,12 +795,13 @@ function carta(
                     limits!(ax_spec, nothing, nothing, first(parsed_clims), last(parsed_clims))
                     set_status!(msg)
                 end
-            else
-                use_manual[] = false
-                set_box_text!(clim_min_box, "")
-                set_box_text!(clim_max_box, "")
-                autolimits!(ax_spec)
-            end
+                else
+                    use_manual[] = false
+                    set_box_text!(clim_min_box, "")
+                    set_box_text!(clim_max_box, "")
+                    autolimits!(ax_spec)
+                    xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
+                end
             set_status!("Loaded settings from $(resolved_settings_path).")
         catch e
             msg = "Failed to load settings: $(sprint(showerror, e))"
@@ -641,7 +826,25 @@ function carta(
                     yreversed = true,
                 )
                 hmS = CairoMakie.heatmap!(axS, slice_disp[]; colormap = cm_obs[], colorrange = clims_obs[])
-                CairoMakie.scatter!(axS, [Point2f(uv_point[]...)], markersize = 10)
+                axS.xgridvisible[] = show_grid[]
+                axS.ygridvisible[] = show_grid[]
+                if show_crosshair[]
+                    u_max, v_max = slice_dims(axis[])
+                    u, v = u_idx[], v_idx[]
+                    CairoMakie.linesegments!(
+                        axS,
+                        Point2f[
+                            Point2f(1, u), Point2f(v_max, u),
+                            Point2f(v, 1), Point2f(v, u_max),
+                        ];
+                        color = (:white, 0.9),
+                        linewidth = 1.6,
+                        linestyle = :dot,
+                    )
+                end
+                if show_marker[]
+                    CairoMakie.scatter!(axS, [Point2f(uv_point[]...)], markersize = 10)
+                end
                 CairoMakie.Colorbar(f_slice[1, 2], hmS; label = "intensity", width = 20)
 
                 CairoMakie.save(String(out), f_slice)
@@ -672,6 +875,7 @@ function carta(
                     ylabel = L"\text{intensity}",
                 )
                 CairoMakie.lines!(axP, spec_x_raw[], spec_y_disp[])
+                CairoMakie.xlims!(axP, 0f0, Float32(max(0, length(spec_x_raw[]) - 1)))
 
                 CairoMakie.save(String(out), f_spec)
                 @info "Saved spectrum" out

@@ -174,7 +174,7 @@ make_spec_title(i::Int, j::Int, k::Int) =
 Inline format; no line breaks to keep layout stable.
 """
 make_info_tex(i::Int, j::Int, k::Int, u::Int, v::Int, val::Real) = latexstring(
-    "\\text{pixel }(i,j,k) = ($i,$j,$k)\\,\\text{ ; slice }(\\text{row},\\text{col}) = ($u,$v)\\,\\text{ ; value }= ",
+    "\\mathbf{pixel}\\,(i,j,k)=($i,$j,$k)\\quad\\mathbf{slice}\\,(\\text{row},\\text{col})=($u,$v)\\quad\\mathbf{intensity}= ",
     isnan(val) ? "NaN" : string(round(Float32(val); digits=4))
 )
 
