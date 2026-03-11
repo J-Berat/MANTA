@@ -27,15 +27,19 @@ export carta
           cmap::Symbol = :viridis,
           vmin = nothing, vmax = nothing,
           invert::Bool = false,
-          fullscreen::Bool = false,
           figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
-          save_dir::Union{Nothing,AbstractString} = nothing)
+          save_dir::Union{Nothing,AbstractString} = nothing,
+          activate_gl::Bool = true,
+          display_fig::Bool = true,
+          settings_path::Union{Nothing,AbstractString} = nothing)
 
 Interactive 3D FITS viewer (slice + per-voxel spectrum).
 - Manual color limits when `vmin` & `vmax` set (also sync spectrum Y).
 - Window sized by explicit `figsize=(w,h)` or a fallback default.
 - Export directory configurable via `save_dir`; defaults to your Desktop if
   it exists, otherwise the current working directory.
+- `activate_gl=false` allows smoke tests without requiring an OpenGL context.
+- `display_fig=false` skips window display (useful for automated tests).
 """
 function carta(
     filepath::String;
@@ -44,17 +48,39 @@ function carta(
     vmax = nothing,
     invert::Bool = false,
     figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
-    save_dir::Union{Nothing,AbstractString} = nothing
+    save_dir::Union{Nothing,AbstractString} = nothing,
+    activate_gl::Bool = true,
+    display_fig::Bool = true,
+    settings_path::Union{Nothing,AbstractString} = nothing
     )
 
     # ---------- Load ----------
-    cube = FITS(filepath) do f
-        read(f[1])
+    if !isfile(filepath)
+        throw(ArgumentError("FITS file not found: $(abspath(filepath))"))
     end
-    @assert ndims(cube) == 3 "Not a 3D cube"
+
+    cube = try
+        FITS(filepath) do f
+            read(f[1])
+        end
+    catch e
+        throw(ArgumentError("Failed to read FITS file $(abspath(filepath)): $(sprint(showerror, e))"))
+    end
+
+    if ndims(cube) != 3
+        throw(ArgumentError("Expected a 3D FITS cube, got ndims=$(ndims(cube)) and size=$(size(cube))."))
+    end
 
     data = Float32.(cube)
     siz  = size(data)  # (nx, ny, nz)
+    
+    slice_dims(axis::Integer) = if axis == 1
+        (siz[2], siz[3])  # (y, z)
+    elseif axis == 2
+        (siz[1], siz[3])  # (x, z)
+    else
+        (siz[1], siz[2])  # (x, y)
+    end
 
     fname_full = basename(filepath)
     fname = String(replace(fname_full, r"\.fits$" => ""))
@@ -93,18 +119,23 @@ function carta(
             k = ImageFiltering.Kernel.gaussian((σ, σ))
             imfilter(Float32.(s), k)
         else
-            Float32.(s)
+            s
         end
     end
 
     # ---- display array: protect against NaN/Inf after log/ln
     slice_disp = lift(slice_proc, img_scale_mode) do s, m
         A = apply_scale(s, m)
-        map(x -> (isfinite(x) && !isnan(x)) ? Float32(x) : 0f0, A)
+        out = similar(A, Float32)
+        @inbounds for i in eachindex(A)
+            x = A[i]
+            out[i] = isfinite(x) ? Float32(x) : 0f0
+        end
+        out
     end
 
     clims_auto = lift(slice_disp) do s
-        clamped_extrema(vec(s))
+        clamped_extrema(s)
     end
 
     clims_manual = Observable((0f0, 1f0))
@@ -132,14 +163,21 @@ function carta(
         end
     end
 
-    spec_x_raw  = Observable(collect(1:siz[3]))
-    spec_y_raw  = Observable(zeros(Float32, siz[3]))
+    spec_x_axes = (collect(1:siz[1]), collect(1:siz[2]), collect(1:siz[3]))
+    spec_y_buf  = Vector{Float32}(undef, siz[3])
+    @views copyto!(spec_y_buf, data[1, 1, :])
+    spec_x_raw  = Observable(spec_x_axes[3])
+    spec_y_raw  = Observable(spec_y_buf)
     spec_y_disp = lift(spec_y_raw, spec_scale_mode) do y, m
         apply_scale(y, m)
     end
 
     # ---------- Figure & layout ----------
-    GLMakie.activate!()
+    if activate_gl
+        GLMakie.activate!()
+    else
+        CairoMakie.activate!()
+    end
     fig = Figure(size = _pick_fig_size(figsize))
 
     main_grid = fig[1, 1] = GridLayout()
@@ -215,8 +253,10 @@ function carta(
     fname_box = Textbox(im_row2[1, 3]; placeholder = "filename base", width = 150, height = 24)
     btn_save_img  = Button(im_row2[1, 4]; label = "Save image", width = 96, height = 26)
     btn_save_spec = Button(im_row2[1, 5]; label = "Save spectrum", width = 118, height = 26)
+    btn_save_state = Button(im_row2[1, 6]; label = "Save settings", width = 112, height = 26)
+    btn_load_state = Button(im_row2[1, 7]; label = "Load settings", width = 112, height = 26)
 
-    foreach(c -> colsize!(im_row2, c, Auto()), 1:5)
+    foreach(c -> colsize!(im_row2, c, Auto()), 1:7)
 
     # Image controls (row3)
     im_row3 = img_ctrl_grid[3, 1:2] = GridLayout(; alignmode = Outside())
@@ -292,13 +332,29 @@ function carta(
         halign    = :left,
         tellwidth = false,
     )
+    ui_status = Observable("Ready.")
+    main_grid[4, 1:2] = Label(
+        main_grid[4, 1:2];
+        text = ui_status,
+        halign = :left,
+        tellwidth = false,
+    )
 
     # ---------- Helpers ----------
+    set_status!(msg::AbstractString) = (ui_status[] = String(msg); nothing)
+    set_box_text!(tb, s::AbstractString) = begin
+        str = String(s)
+        tb.displayed_string[] = str
+        tb.stored_string[] = str
+        nothing
+    end
+
     function refresh_uv!()
         a = axis[]
+        u_max, v_max = slice_dims(a)
         u, v = ijk_to_uv(i_idx[], j_idx[], k_idx[], a)
-        u = clamp(u, 1, size(slice_raw[], 1))
-        v = clamp(v, 1, size(slice_raw[], 2))
+        u = clamp(u, 1, u_max)
+        v = clamp(v, 1, v_max)
         u_idx[] = u; v_idx[] = v
         uv_point[] = Point2f(v, u)
     end
@@ -311,12 +367,19 @@ function carta(
 
     function refresh_spectrum!()
         if axis[] == 1
-            spec_x_raw[] = collect(1:siz[1]); spec_y_raw[] = data[:, j_idx[], k_idx[]]
+            spec_x_raw[] = spec_x_axes[1]
+            resize!(spec_y_buf, siz[1])
+            @views copyto!(spec_y_buf, data[:, j_idx[], k_idx[]])
         elseif axis[] == 2
-            spec_x_raw[] = collect(1:siz[2]); spec_y_raw[] = data[i_idx[], :, k_idx[]]
+            spec_x_raw[] = spec_x_axes[2]
+            resize!(spec_y_buf, siz[2])
+            @views copyto!(spec_y_buf, data[i_idx[], :, k_idx[]])
         else
-            spec_x_raw[] = collect(1:siz[3]); spec_y_raw[] = data[i_idx[], j_idx[], :]
+            spec_x_raw[] = spec_x_axes[3]
+            resize!(spec_y_buf, siz[3])
+            @views copyto!(spec_y_buf, data[i_idx[], j_idx[], :])
         end
+        spec_y_raw[] = spec_y_buf
         if use_manual[]
             vmin_, vmax_ = clims_manual[]; limits!(ax_spec, nothing, nothing, vmin_, vmax_)
         else
@@ -346,13 +409,16 @@ function carta(
     end
 
     # ---------- UI callbacks ----------
+        # Keep the slice slider synced to the active axis (range + knob position)
     on(axis_menu.selection) do sel
         sel === nothing && return
         new_axis = findfirst(==(String(sel)), axes_labels)
         new_axis === nothing && return
         axis[] = new_axis
-        slice_slider.range[] = 1:siz[new_axis]
-        idx[] = min(idx[], siz[new_axis])
+        new_range = 1:siz[new_axis]
+        slice_slider.range[] = new_range
+        idx[] = clamp(idx[], first(new_range), last(new_range))
+        slice_slider.value[] = idx[]  # move the thumb if the old value was out of bounds
         ii, jj, kk = uv_to_ijk(u_idx[], v_idx[], axis[], idx[])
         i_idx[] = clamp(ii, 1, siz[1]); j_idx[] = clamp(jj, 1, siz[2]); k_idx[] = clamp(kk, 1, siz[3])
         refresh_all!()
@@ -392,37 +458,38 @@ function carta(
     on(clim_apply_btn.clicks) do _
         txtmin = get_box_str(clim_min_box)
         txtmax = get_box_str(clim_max_box)
-        if isempty(txtmin) || isempty(txtmax)
+        ok, new_manual, parsed_clims, msg = parse_manual_clims(txtmin, txtmax; fallback = clims_manual[])
+        set_status!(msg)
+        if !ok
+            @warn "Could not apply colorbar limits" txtmin txtmax msg
+            return
+        end
+        if new_manual
+            clims_manual[] = parsed_clims
+            use_manual[] = true
+            limits!(ax_spec, nothing, nothing, first(parsed_clims), last(parsed_clims))
+            set_box_text!(clim_min_box, string(first(parsed_clims)))
+            set_box_text!(clim_max_box, string(last(parsed_clims)))
+        else
             use_manual[] = false
             autolimits!(ax_spec)
-        else
-            vmin_p = tryparse(Float32, txtmin); vmax_p = tryparse(Float32, txtmax)
-            if vmin_p === nothing || vmax_p === nothing
-                @warn "Could not parse colorbar limits" txtmin txtmax
-            else
-                if vmin_p == vmax_p
-                    vmin_p = prevfloat(vmin_p); vmax_p = nextfloat(vmax_p)
-                end
-                clims_manual[] = (vmin_p, vmax_p)
-                use_manual[]   = true
-                limits!(ax_spec, nothing, nothing, vmin_p, vmax_p)
-            end
         end
     end
 
     # Keyboard navigation (+ invert)
     on(events(fig).keyboardbutton) do ev
         ev.action == Keyboard.press || return
+        u_max, v_max = slice_dims(axis[])
         if ev.key == Keyboard.i
             invert_cmap[] = !invert_cmap[]
         elseif ev.key == Keyboard.left
             v_idx[] = max(1, v_idx[] - 1)
         elseif ev.key == Keyboard.right
-            v_idx[] = min(size(slice_raw[], 2), v_idx[] + 1)
+            v_idx[] = min(v_max, v_idx[] + 1)
         elseif ev.key == Keyboard.up
-            u_idx[] = max(1, u_idx[] - 1)
+            u_idx[] = min(u_max, u_idx[] + 1)
         elseif ev.key == Keyboard.down
-            u_idx[] = min(size(slice_raw[], 1), u_idx[] + 1)
+            u_idx[] = max(1, u_idx[] - 1)
         else
             return
         end
@@ -437,10 +504,11 @@ function carta(
         if ev.button == Mouse.left && ev.action == Mouse.press
             p = mouseposition(ax_img)
             if any(isnan, p)
-                return  
+                return
             end
-            u = Int(round(clamp(p[2], 1, size(slice_raw[], 1))))
-            v = Int(round(clamp(p[1], 1, size(slice_raw[], 2))))
+            u_max, v_max = slice_dims(axis[])
+            u = Int(round(clamp(p[2], 1, u_max)))
+            v = Int(round(clamp(p[1], 1, v_max)))
             u_idx[] = u; v_idx[] = v
             ii, jj, kk = uv_to_ijk(u, v, axis[], idx[])
             i_idx[] = clamp(ii, 1, siz[1]); j_idx[] = clamp(jj, 1, siz[2]); k_idx[] = clamp(kk, 1, siz[3])
@@ -460,25 +528,108 @@ function carta(
         end
         path
     end
+    resolved_settings_path = settings_path === nothing ?
+        joinpath(save_root, "$(fname)_viewer_settings.toml") :
+        abspath(String(settings_path))
+
+    current_settings() = Dict{String,Any}(
+        "axis" => axis[],
+        "index" => idx[],
+        "img_scale" => String(img_scale_mode[]),
+        "spec_scale" => String(spec_scale_mode[]),
+        "colormap" => String(cmap_name[]),
+        "invert_colormap" => invert_cmap[],
+        "use_manual_clims" => use_manual[],
+        "clim_min" => use_manual[] ? first(clims_manual[]) : first(clims_auto[]),
+        "clim_max" => use_manual[] ? last(clims_manual[]) : last(clims_auto[]),
+    )
 
     make_name = function (base::AbstractString, ext::AbstractString)
         b = isempty(base) ? fname : base
         return "$(b)_axis$(axis[])_idx$(idx[])_i$(i_idx[])_j$(j_idx[])_k$(k_idx[])_img$(String(img_scale_mode[]))_spec$(String(spec_scale_mode[])).$(ext)"
     end
 
-    # Async helper (no-op if it already exists)
-    spawn_safely(f::Function) = @async try f() catch e
-        @error "Background task failed" exception=(e, catch_backtrace())
-    end
-
     # Unified export (let Makie/Cairo choose the backend)
     save_with_format(path::AbstractString, fig) = CairoMakie.save(String(path), fig)
+
+    on(btn_save_state.clicks) do _
+        try
+            save_viewer_settings(resolved_settings_path, current_settings())
+            set_status!("Saved settings to $(resolved_settings_path).")
+        catch e
+            msg = "Failed to save settings: $(sprint(showerror, e))"
+            set_status!(msg)
+            @error msg exception=(e, catch_backtrace())
+        end
+    end
+
+    on(btn_load_state.clicks) do _
+        if !isfile(resolved_settings_path)
+            set_status!("Settings file not found: $(resolved_settings_path)")
+            return
+        end
+        try
+            st = load_viewer_settings(resolved_settings_path)
+
+            axis_val = clamp(Int(get(st, "axis", axis[])), 1, 3)
+            axis_menu.selection[] = axes_labels[axis_val]
+
+            idx_val = clamp(Int(get(st, "index", idx[])), 1, siz[axis_val])
+            slice_slider.value[] = idx_val
+
+            img_scale_val = String(get(st, "img_scale", String(img_scale_mode[])))
+            if img_scale_val in ("lin", "log10", "ln")
+                img_scale_menu.selection[] = img_scale_val
+            end
+
+            spec_scale_val = String(get(st, "spec_scale", String(spec_scale_mode[])))
+            if spec_scale_val in ("lin", "log10", "ln")
+                spec_scale_menu.selection[] = spec_scale_val
+            end
+
+            cmap_val = Symbol(String(get(st, "colormap", String(cmap_name[]))))
+            try
+                to_cmap(cmap_val)
+                cmap_name[] = cmap_val
+            catch
+                @warn "Ignoring invalid colormap in settings" colormap=cmap_val
+            end
+
+            invert_val = Bool(get(st, "invert_colormap", invert_cmap[]))
+            invert_chk.checked[] = invert_val
+
+            use_manual_val = Bool(get(st, "use_manual_clims", use_manual[]))
+            if use_manual_val
+                cmin = Float32(get(st, "clim_min", first(clims_manual[])))
+                cmax = Float32(get(st, "clim_max", last(clims_manual[])))
+                ok, new_manual, parsed_clims, msg = parse_manual_clims(string(cmin), string(cmax); fallback = clims_manual[])
+                if ok && new_manual
+                    clims_manual[] = parsed_clims
+                    use_manual[] = true
+                    set_box_text!(clim_min_box, string(first(parsed_clims)))
+                    set_box_text!(clim_max_box, string(last(parsed_clims)))
+                    limits!(ax_spec, nothing, nothing, first(parsed_clims), last(parsed_clims))
+                    set_status!(msg)
+                end
+            else
+                use_manual[] = false
+                set_box_text!(clim_min_box, "")
+                set_box_text!(clim_max_box, "")
+                autolimits!(ax_spec)
+            end
+            set_status!("Loaded settings from $(resolved_settings_path).")
+        catch e
+            msg = "Failed to load settings: $(sprint(showerror, e))"
+            set_status!(msg)
+            @error msg exception=(e, catch_backtrace())
+        end
+    end
 
     # ---------- Save image (slice + colorbar + crosshair) ----------
     on(btn_save_img.clicks) do _
         spawn_safely() do
             ext  = String(something(fmt_menu.selection[], "png"))
-            out  = joinpath(save_root, "$(fname)_idx$(idx[])_axis$(axis[]).$(ext)")
+            out  = joinpath(save_root, make_name(get_box_str(fname_box), ext))
             try
                 f_slice = CairoMakie.Figure(size = (700, 560))
                 axS = CairoMakie.Axis(
@@ -495,8 +646,11 @@ function carta(
 
                 CairoMakie.save(String(out), f_slice)
                 @info "Saved image" out
+                set_status!("Saved image to $(out).")
             catch e
-                @error "Failed to save image" out exception=(e, catch_backtrace())
+                msg = "Failed to save image $(out): $(sprint(showerror, e))"
+                set_status!(msg)
+                @error msg exception=(e, catch_backtrace())
             end
         end
     end
@@ -505,8 +659,9 @@ function carta(
     on(btn_save_spec.clicks) do _
         spawn_safely() do
             ext = String(something(fmt_menu.selection[], "png"))
-            oout = joinpath(save_root,
-                "$(fname)_spectrum_i$(i_idx[])_j$(j_idx[])_axis$(axis[]).$(ext)")
+            base = get_box_str(fname_box)
+            base = isempty(base) ? "$(fname)_spectrum" : base
+            out = joinpath(save_root, make_name(base, ext))
 
             try
                 f_spec = CairoMakie.Figure(size = (600, 400))
@@ -520,8 +675,11 @@ function carta(
 
                 CairoMakie.save(String(out), f_spec)
                 @info "Saved spectrum" out
+                set_status!("Saved spectrum to $(out).")
             catch e
-                @error "Failed to save spectrum" out exception=(e, catch_backtrace())
+                msg = "Failed to save spectrum $(out): $(sprint(showerror, e))"
+                set_status!(msg)
+                @error msg exception=(e, catch_backtrace())
             end
         end
     end
@@ -530,20 +688,23 @@ function carta(
     # ---------- GIF export  ----------
     on(anim_btn.clicks) do _
         a = axis[]; amax = siz[a]
-
-        start = let v = get_box_str(start_box); isempty(v) ? 1 : clamp(something(tryparse(Int, v), 1), 1, amax) end
-        stop  = let v = get_box_str(stop_box);  isempty(v) ? amax : clamp(something(tryparse(Int, v), amax), 1, amax) end
-        step  = let v = get_box_str(step_box);  isempty(v) ? 1 : max(1, something(tryparse(Int, v), 1)) end
-        fps   = let v = get_box_str(fps_box);   isempty(v) ? 12 : max(1, something(tryparse(Int, v), 12)) end
-
-        frames = collect(start:step:stop)
-        if pingpong_chk.checked[] && length(frames) >= 2
-            frames = vcat(frames, reverse(frames[2:end-1]))
+        ok, frames, fps, msg = parse_gif_request(
+            get_box_str(start_box),
+            get_box_str(stop_box),
+            get_box_str(step_box),
+            get_box_str(fps_box),
+            amax;
+            pingpong = pingpong_chk.checked[]
+        )
+        set_status!(msg)
+        if !ok
+            @warn "Invalid GIF parameters" msg axis=a amax=amax
+            return
         end
 
         # strict name: <fits_name>.gif (e.g., synthetic_cube.gif)
         outfile = joinpath(save_root, "$(fname).gif")
-        nx, ny = size(slice_raw[], 2), size(slice_raw[], 1)
+        ny, nx = slice_dims(axis[])
         w_img = 640
         h_img = Int(round(w_img * ny / nx))
         extra_for_cb = 80 # colorbar space
@@ -559,8 +720,11 @@ function carta(
                 idx[] = fidx
             end
             @info "Animation saved: $outfile"
+            set_status!("GIF exported to $(outfile).")
         catch e
-            @error "Failed to export animation $outfile: $e"
+            msg2 = "Failed to export animation $(outfile): $(sprint(showerror, e))"
+            set_status!(msg2)
+            @error msg2 exception=(e, catch_backtrace())
         end
     end
 
@@ -574,7 +738,9 @@ function carta(
             forget!(fig)  
         end
     end
-    display(fig)
+    if display_fig
+        display(fig)
+    end
     return fig
 end
 

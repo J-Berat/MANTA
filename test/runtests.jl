@@ -1,5 +1,4 @@
 # path: test/runtests.jl
-import Pkg
 using Test
 
 # load the local module
@@ -11,6 +10,7 @@ using Observables
 using Makie
 using LaTeXStrings
 using ColorTypes
+using FITSIO
 
 @testset "helpers: scaling" begin
     A = Float32.([1, 10, 100, 0, -1])
@@ -81,7 +81,7 @@ end
     end
 
     # Expect inline LaTeX (e.g., \\, for thin space)
-    @test occursin("\\\\,", raw_s) || occursin("\\\\,", raw_t1) || occursin("\\\\,", raw_t2)
+    @test occursin("\\,", raw_s) || occursin("\\,", raw_t1) || occursin("\\,", raw_t2)
 end
 
 @testset "helpers: io" begin
@@ -109,4 +109,90 @@ end
     @test CartaViewer._pick_fig_size((111, 222)) == (111, 222)
     # default when no explicit size is provided
     @test CartaViewer._pick_fig_size(nothing) == (1800, 900)
+end
+
+@testset "helpers: validation" begin
+    ok, use_manual, clims, msg = CartaViewer.parse_manual_clims("1.5", "2.5")
+    @test ok && use_manual
+    @test clims == (1.5f0, 2.5f0)
+    @test !isempty(msg)
+
+    ok2, use_manual2, _, _ = CartaViewer.parse_manual_clims("", "")
+    @test ok2 && !use_manual2
+
+    ok3, use_manual3, _, _ = CartaViewer.parse_manual_clims("9", "2")
+    @test ok3 && use_manual3
+
+    ok4, _, _, _ = CartaViewer.parse_manual_clims("a", "2")
+    @test !ok4
+
+    gok, frames, fps, _ = CartaViewer.parse_gif_request("1", "5", "2", "10", 10)
+    @test gok
+    @test frames == [1, 3, 5]
+    @test fps == 10
+
+    gok2, frames2, _, _ = CartaViewer.parse_gif_request("5", "1", "2", "12", 10; pingpong = true)
+    @test gok2
+    @test frames2 == [1, 3, 5, 3]
+
+    gok3, _, _, _ = CartaViewer.parse_gif_request("1", "5", "0", "12", 10)
+    @test !gok3
+end
+
+@testset "helpers: settings io" begin
+    mktempdir() do tmp
+        settings_path = joinpath(tmp, "viewer_settings.toml")
+        payload = Dict{String,Any}(
+            "axis" => 2,
+            "img_scale" => "log10",
+            "colormap" => "viridis",
+            "use_manual_clims" => true,
+            "clim_min" => 0.1,
+            "clim_max" => 42.0,
+        )
+        CartaViewer.save_viewer_settings(settings_path, payload)
+        @test isfile(settings_path)
+
+        restored = CartaViewer.load_viewer_settings(settings_path)
+        @test restored["axis"] == 2
+        @test restored["img_scale"] == "log10"
+        @test restored["use_manual_clims"] == true
+    end
+end
+
+@testset "integration: carta smoke and errors" begin
+    mktempdir() do tmp
+        cube_path = joinpath(tmp, "cube3d.fits")
+        cube = reshape(Float32.(1:60), 3, 4, 5)
+        FITS(cube_path, "w") do f
+            write(f, cube)
+        end
+
+        fig = CartaViewer.carta(
+            cube_path;
+            activate_gl = false,
+            display_fig = false,
+            save_dir = tmp,
+            settings_path = joinpath(tmp, "state.toml"),
+            figsize = (800, 500),
+        )
+        @test fig isa Makie.Figure
+        CartaViewer.forget!(fig)
+
+        missing = joinpath(tmp, "does_not_exist.fits")
+        @test_throws ArgumentError CartaViewer.carta(missing; activate_gl = false, display_fig = false)
+
+        bad_path = joinpath(tmp, "cube2d.fits")
+        FITS(bad_path, "w") do f
+            write(f, reshape(Float32.(1:12), 3, 4))
+        end
+        err = try
+            CartaViewer.carta(bad_path; activate_gl = false, display_fig = false)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("Expected a 3D FITS cube", sprint(showerror, err))
+    end
 end

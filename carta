@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+if [[ "${1:-}" == "--setup" ]]; then
+  julia --project scripts/setup.jl
+  shift || true
+fi
+
+if [[ $# -eq 0 ]]; then
+  exec julia --project demo/run_demo.jl
+fi
+
+exec julia --project -e '
+import Pkg
+Pkg.activate(".")
+Pkg.instantiate()
+push!(LOAD_PATH, "src")
+using CartaViewer
+
+fits_path = abspath(ARGS[1])
+fig = CartaViewer.carta(fits_path; cmap=:magma, invert=false)
+display(fig)
+while isopen(fig.scene)
+    sleep(0.1)
+end
+' "$1"
