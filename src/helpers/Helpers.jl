@@ -119,11 +119,11 @@ Returns a 2D slice (view when possible), orientation consistent with `ijk_to_uv`
 function get_slice(data::AbstractArray{T,3}, axis::Integer, idx::Integer) where {T}
     @assert 1 ≤ axis ≤ 3 "axis must be 1,2,3"
     if axis == 1
-        @views return data[idx, :, :]  # (y,z)
+        @views return copy(data[idx, :, :])  # (y,z)
     elseif axis == 2
-        @views return data[:, idx, :]  # (x,z)
+        @views return copy(data[:, idx, :])  # (x,z)
     else
-        @views return data[:, :, idx]  # (x,y)
+        @views return copy(data[:, :, idx])  # (x,y)
     end
 end
 

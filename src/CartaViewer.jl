@@ -82,6 +82,15 @@ function carta(
         (siz[1], siz[2])  # (x, y)
     end
 
+    # Heatmap x-axis is v (columns) and y-axis is u (rows), with (u,v) from ijk_to_uv.
+    slice_axis_labels(axis::Integer) = if axis == 1
+        (L"\text{pixel } z", L"\text{pixel } y")
+    elseif axis == 2
+        (L"\text{pixel } z", L"\text{pixel } x")
+    else
+        (L"\text{pixel } y", L"\text{pixel } x")
+    end
+
     fname_full = basename(filepath)
     fname = String(replace(fname_full, r"\.fits$" => ""))
 
@@ -123,8 +132,12 @@ function carta(
     ui_accent = RGBf(0.12, 0.45, 0.82)
     ui_accent_dim = RGBf(0.50, 0.67, 0.89)
     ui_track = RGBf(0.84, 0.88, 0.93)
-    ui_panel_bg = RGBf(0.96, 0.97, 0.99)
-    ui_panel_border = RGBf(0.79, 0.83, 0.90)
+    ui_surface = RGBf(0.95, 0.97, 0.995)
+    ui_surface_hover = RGBf(0.92, 0.95, 0.99)
+    ui_surface_active = RGBf(0.88, 0.92, 0.98)
+    ui_border = RGBf(0.66, 0.73, 0.84)
+    ui_text = RGBf(0.10, 0.15, 0.24)
+    ui_text_muted = RGBf(0.32, 0.39, 0.50)
 
     style_checkbox!(chk) = begin
         chk.size[] = 22
@@ -148,6 +161,67 @@ function carta(
         sl.color_inactive[] = ui_track
         sl
     end
+
+    style_button!(btn) = begin
+        btn.height[] = 32
+        btn.cornerradius[] = 8
+        btn.strokewidth[] = 1.3
+        btn.strokecolor[] = ui_border
+        btn.buttoncolor[] = ui_surface
+        btn.buttoncolor_hover[] = ui_surface_hover
+        btn.buttoncolor_active[] = ui_surface_active
+        btn.labelcolor[] = ui_text
+        btn.labelcolor_hover[] = ui_text
+        btn.labelcolor_active[] = ui_text
+        btn.fontsize[] = 18
+        btn.padding[] = (12, 12, 8, 8)
+        btn
+    end
+
+    style_menu!(menu) = begin
+        menu.height[] = 34
+        menu.width[] = max(menu.width[], 106)
+        menu.textcolor[] = ui_text
+        menu.fontsize[] = 18
+        menu.dropdown_arrow_color[] = ui_text_muted
+        menu.dropdown_arrow_size[] = 12
+        menu.textpadding[] = (10, 10, 8, 8)
+        menu.cell_color_inactive_even[] = ui_surface
+        menu.cell_color_inactive_odd[] = ui_surface
+        menu.selection_cell_color_inactive[] = ui_surface
+        menu.cell_color_hover[] = ui_surface_hover
+        menu.cell_color_active[] = ui_surface_active
+        menu
+    end
+
+    style_textbox!(tb) = begin
+        tb.height[] = 34
+        tb.fontsize[] = 18
+        tb.textcolor[] = ui_text
+        tb.textcolor_placeholder[] = ui_text_muted
+        tb.boxcolor[] = ui_surface
+        tb.boxcolor_hover[] = ui_surface_hover
+        tb.boxcolor_focused[] = RGBf(0.98, 0.99, 1.0)
+        tb.bordercolor[] = ui_border
+        tb.bordercolor_hover[] = ui_accent_dim
+        tb.bordercolor_focused[] = ui_accent
+        tb.borderwidth[] = 1.6
+        tb.cornerradius[] = 8
+        tb.textpadding[] = (10, 10, 8, 8)
+        tb
+    end
+
+    latex_tick(v::Real) = begin
+        x = abs(Float64(v)) < 1e-10 ? 0.0 : Float64(v)
+        r = round(x)
+        s = if abs(x - r) < 1e-8
+            string(Int(r))
+        else
+            string(round(x; digits = 2))
+        end
+        latexstring("\\mathrm{", latex_safe(s), "}")
+    end
+    latex_tick_formatter(vals) = [latex_tick(v) for v in vals]
 
     slice_proc = lift(slice_raw, gauss_on, sigma) do s, on, σ
         if on && σ > 0
@@ -218,14 +292,17 @@ function carta(
     main_grid = fig[1, 1] = GridLayout()
     # Image + colorbar
     img_grid  = main_grid[1, 1] = GridLayout()
-    colgap!(img_grid, 0)
+    colgap!(img_grid, -8)
 
+    xlab0, ylab0 = slice_axis_labels(axis[])
     ax_img = Axis(
         img_grid[1, 1];
         title     = make_main_title(fname),
-        xlabel    = L"\text{pixel } x",
-        ylabel    = L"\text{pixel } y",
+        xlabel    = xlab0,
+        ylabel    = ylab0,
         aspect    = DataAspect(),
+        xtickformat = latex_tick_formatter,
+        ytickformat = latex_tick_formatter,
     )
 
     uv_point = Observable(Point2f(1, 1))
@@ -292,6 +369,8 @@ function carta(
         ylabel = L"\text{intensity}",
         width  = 600,
         height = 400,
+        xtickformat = latex_tick_formatter,
+        ytickformat = latex_tick_formatter,
     )
     lines!(ax_spec, spec_x_raw, spec_y_disp)
     ax_img.xgridvisible[] = show_grid[]
@@ -303,62 +382,57 @@ function carta(
     img_ctrl_grid  = main_grid[2, 1] = GridLayout(; alignmode = Outside(), tellwidth = false, tellheight = false)
     spec_ctrl_grid = main_grid[2, 2] = GridLayout(; alignmode = Outside(), tellwidth = false, tellheight = false)
 
-    colgap!(img_ctrl_grid, 6); rowgap!(img_ctrl_grid, 6)
-    colgap!(spec_ctrl_grid, 6); rowgap!(spec_ctrl_grid, 6)
+    colgap!(img_ctrl_grid, 10); rowgap!(img_ctrl_grid, 10)
+    colgap!(spec_ctrl_grid, 10); rowgap!(spec_ctrl_grid, 10)
 
     # Image controls (row1)
     im_row1 = img_ctrl_grid[1, 1:2] = GridLayout(; alignmode = Outside())
-    colgap!(im_row1, 6)
+    colgap!(im_row1, 10)
 
     Label(im_row1[1, 1], text = L"\text{Image scale}", halign = :left, tellwidth = false)
-    img_scale_menu = Menu(im_row1[1, 2]; options = ["lin", "log10", "ln"], prompt = "lin", width = 60)
+    img_scale_menu = Menu(im_row1[1, 2]; options = ["lin", "log10", "ln"], prompt = "lin", width = 92)
 
     Label(im_row1[1, 3], text = L"\text{Spectrum scale}", halign = :left, tellwidth = false)
-    spec_scale_menu = Menu(im_row1[1, 4]; options = ["lin", "log10", "ln"], prompt = "lin", width = 60)
+    spec_scale_menu = Menu(im_row1[1, 4]; options = ["lin", "log10", "ln"], prompt = "lin", width = 92)
 
-    reset_zoom_btn = Button(im_row1[1, 5]; label = "Reset zoom", width = 96, height = 26)
+    reset_zoom_btn = Button(im_row1[1, 5]; label = "Reset zoom", width = 130, height = 30)
 
     foreach(c -> colsize!(im_row1, c, Auto()), 1:5)
 
     # Image controls (row2)
     im_row2 = img_ctrl_grid[2, 1:2] = GridLayout(; alignmode = Outside())
-    colgap!(im_row2, 4)
+    colgap!(im_row2, 10)
 
     Label(im_row2[1, 1], text = L"\text{Save}", halign = :left, tellwidth = false)
-    fmt_menu  = Menu(im_row2[1, 2]; options = ["png", "pdf"], prompt = "png", width = 60)
-    fname_box = Textbox(im_row2[1, 3]; placeholder = "filename base", width = 150, height = 24)
-    btn_save_img  = Button(im_row2[1, 4]; label = "Save image", width = 96, height = 26)
-    btn_save_spec = Button(im_row2[1, 5]; label = "Save spectrum", width = 118, height = 26)
-    btn_save_state = Button(im_row2[1, 6]; label = "Save settings", width = 112, height = 26)
-    btn_load_state = Button(im_row2[1, 7]; label = "Load settings", width = 112, height = 26)
+    fmt_menu  = Menu(im_row2[1, 2]; options = ["png", "pdf"], prompt = "png", width = 92)
+    fname_box = Textbox(im_row2[1, 3]; placeholder = "filename base", width = 220, height = 30)
+    btn_save_img  = Button(im_row2[1, 4]; label = "Save image", width = 136, height = 30)
+    btn_save_spec = Button(im_row2[1, 5]; label = "Save spectrum", width = 160, height = 30)
+    btn_save_state = Button(im_row2[1, 6]; label = "Save settings", width = 160, height = 30)
+    btn_load_state = Button(im_row2[1, 7]; label = "Load settings", width = 160, height = 30)
 
     foreach(c -> colsize!(im_row2, c, Auto()), 1:7)
 
     # Image controls (row3)
     im_row3 = img_ctrl_grid[3, 1:2] = GridLayout(; alignmode = Outside())
-    colgap!(im_row3, 6)
-    Box(im_row3[1, 1:8]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
+    colgap!(im_row3, 10)
 
     Label(im_row3[1, 1], text = L"\text{GIF indices}", halign = :left, tellwidth = false)
-    start_box = Textbox(im_row3[1, 2]; placeholder = "start", width = 70, height = 26)
-    stop_box  = Textbox(im_row3[1, 3]; placeholder = "stop",  width = 70, height = 26)
-    step_box  = Textbox(im_row3[1, 4]; placeholder = "step",  width = 70, height = 26)
-    fps_box   = Textbox(im_row3[1, 5]; placeholder = "fps",   width = 70, height = 26)
-
-    pingpong_chk = Checkbox(im_row3[1, 6])
-    Label(im_row3[1, 7], text = L"\text{Back-and-forth mode}", halign = :left, tellwidth = false)
-    anim_btn = Button(im_row3[1, 8], label = "Export GIF")
-
-    foreach(c -> colsize!(im_row3, c, Auto()), 1:8)
+    start_box = Textbox(im_row3[1, 2]; placeholder = "start", width = 90, height = 30)
+    stop_box  = Textbox(im_row3[1, 3]; placeholder = "stop",  width = 90, height = 30)
+    step_box  = Textbox(im_row3[1, 4]; placeholder = "step",  width = 90, height = 30)
+    fps_box   = Textbox(im_row3[1, 5]; placeholder = "fps",   width = 90, height = 30)
+    anim_btn = Button(im_row3[1, 6], label = "Export GIF", width = 128, height = 30)
+    foreach(c -> colsize!(im_row3, c, Auto()), 1:6)
 
     # Image controls (row4)
     im_row4 = img_ctrl_grid[4, 1:2] = GridLayout(; alignmode = Outside())
-    colgap!(im_row4, 6)
+    colgap!(im_row4, 10)
 
     Label(im_row4[1, 1], text = L"\text{Colorbar limits}", halign = :left, tellwidth = false)
-    clim_min_box   = Textbox(im_row4[1, 2]; placeholder = "min", width = 100, height = 24)
-    clim_max_box   = Textbox(im_row4[1, 3]; placeholder = "max", width = 100, height = 24)
-    clim_apply_btn = Button(im_row4[1, 4], label = "Apply")
+    clim_min_box   = Textbox(im_row4[1, 2]; placeholder = "min", width = 130, height = 30)
+    clim_max_box   = Textbox(im_row4[1, 3]; placeholder = "max", width = 130, height = 30)
+    clim_apply_btn = Button(im_row4[1, 4], label = "Apply", width = 90, height = 30)
 
     foreach(c -> colsize!(im_row4, c, Auto()), 1:4)
 
@@ -369,58 +443,53 @@ function carta(
         clim_max_box.displayed_string[] = s_mx; clim_max_box.stored_string[] = s_mx
     end
 
-    # Spectrum controls moved under the image controls for easier access
+    # Slice controls
     im_row5 = img_ctrl_grid[5, 1:2] = GridLayout(; alignmode = Outside())
-    colgap!(im_row5, 6)
-    Box(im_row5[1, 1:5]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
+    colgap!(im_row5, 10)
 
     Label(im_row5[1, 1], text = L"\text{Slice axis}", halign = :left, tellwidth = false)
     axes_labels = ["dim1 (x)", "dim2 (y)", "dim3 (z)"]
-    axis_menu = Menu(im_row5[1, 2]; options = axes_labels, prompt = "dim3 (z)", width = 90)
+    axis_menu = Menu(im_row5[1, 2]; options = axes_labels, prompt = "dim3 (z)", width = 122)
     status_label = Label(
         im_row5[1, 3];
         text      = latexstring("\\text{axis } 3,\\, \\text{index } 1"),
-        fontsize  = 12,
+        fontsize  = 16,
         halign    = :left,
         tellwidth = false,
     )
     Label(im_row5[1, 4], text = L"\text{Index}", halign = :left, tellwidth = false)
-    slice_slider = Slider(im_row5[1, 5]; range = 1:siz[3], startvalue = 1, width = 200, height = 10)
+    slice_slider = Slider(im_row5[1, 5]; range = 1:siz[3], startvalue = 1, width = 260, height = 10)
 
     foreach(c -> colsize!(im_row5, c, Auto()), 1:5)
 
+    # Sigma control (toggle moved to the right panel)
     im_row6 = img_ctrl_grid[6, 1:2] = GridLayout(; alignmode = Outside())
-    colgap!(im_row6, 6)
-    Box(im_row6[1, 1:7]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
-
-    Label(im_row6[1, 1], text = L"\text{Display options}", halign = :left, tellwidth = false)
-    invert_chk = Checkbox(im_row6[1, 2])
-    Label(im_row6[1, 3], text = L"\text{Invert colormap}", halign = :left, tellwidth = false)
-    gauss_chk = Checkbox(im_row6[1, 4])
-    Label(im_row6[1, 5], text = L"\text{Gaussian filter}", halign = :left, tellwidth = false)
+    colgap!(im_row6, 10)
+    Label(im_row6[1, 1], text = L"\text{Gaussian }\sigma", halign = :left, tellwidth = false)
     sigma_label = Label(
-        im_row6[1, 6];
+        im_row6[1, 2];
         text      = latexstring("\\sigma = 1.5\\,\\text{px}"),
-        fontsize  = 12,
+        fontsize  = 16,
         halign    = :left,
         tellwidth = false,
     )
 
-    sigma_slider = Slider(im_row6[1, 7]; range = LinRange(0, 10, 101), startvalue = 1.5, width = 200, height = 10)
-    foreach(c -> colsize!(im_row6, c, Auto()), 1:7)
+    sigma_slider = Slider(im_row6[1, 3]; range = LinRange(0, 10, 101), startvalue = 1.5, width = 260, height = 10)
+    foreach(c -> colsize!(im_row6, c, Auto()), 1:3)
 
-    im_row7 = img_ctrl_grid[7, 1:2] = GridLayout(; alignmode = Outside())
-    colgap!(im_row7, 6)
-    Box(im_row7[1, 1:7]; color = ui_panel_bg, strokecolor = ui_panel_border, strokewidth = 1, cornerradius = 8, z = -5)
+    # Right-side toggle panel
+    sp_row1 = spec_ctrl_grid[1, 1] = GridLayout(; alignmode = Outside())
+    colgap!(sp_row1, 10)
+    Label(sp_row1[1, 1], text = L"\text{Display toggles}", halign = :left, tellwidth = false, fontsize = 17, color = ui_text)
 
-    Label(im_row7[1, 1], text = L"\text{Overlay toggles}", halign = :left, tellwidth = false)
-    crosshair_chk = Checkbox(im_row7[1, 2])
-    Label(im_row7[1, 3], text = L"\text{Crosshair}", halign = :left, tellwidth = false)
-    marker_chk = Checkbox(im_row7[1, 4])
-    Label(im_row7[1, 5], text = L"\text{Selected point}", halign = :left, tellwidth = false)
-    grid_chk = Checkbox(im_row7[1, 6])
-    Label(im_row7[1, 7], text = L"\text{Grid}", halign = :left, tellwidth = false)
-    foreach(c -> colsize!(im_row7, c, Auto()), 1:7)
+    invert_chk = Checkbox(sp_row1[2, 1]); Label(sp_row1[2, 2], text = "Invert colormap", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
+    gauss_chk = Checkbox(sp_row1[3, 1]); Label(sp_row1[3, 2], text = "Gaussian filter", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
+    crosshair_chk = Checkbox(sp_row1[4, 1]); Label(sp_row1[4, 2], text = "Crosshair", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
+    marker_chk = Checkbox(sp_row1[5, 1]); Label(sp_row1[5, 2], text = "Selected point", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
+    grid_chk = Checkbox(sp_row1[6, 1]); Label(sp_row1[6, 2], text = "Grid", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
+    pingpong_chk = Checkbox(sp_row1[7, 1]); Label(sp_row1[7, 2], text = "GIF back-and-forth", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
+    rowsize!(sp_row1, 1, Auto())
+    foreach(c -> colsize!(sp_row1, c, Auto()), 1:2)
 
     style_checkbox!(pingpong_chk)
     style_checkbox!(invert_chk)
@@ -428,6 +497,24 @@ function carta(
     style_checkbox!(crosshair_chk)
     style_checkbox!(marker_chk)
     style_checkbox!(grid_chk)
+    style_menu!(img_scale_menu)
+    style_menu!(spec_scale_menu)
+    style_menu!(fmt_menu)
+    style_menu!(axis_menu)
+    style_textbox!(fname_box)
+    style_textbox!(start_box)
+    style_textbox!(stop_box)
+    style_textbox!(step_box)
+    style_textbox!(fps_box)
+    style_textbox!(clim_min_box)
+    style_textbox!(clim_max_box)
+    style_button!(reset_zoom_btn)
+    style_button!(btn_save_img)
+    style_button!(btn_save_spec)
+    style_button!(btn_save_state)
+    style_button!(btn_load_state)
+    style_button!(anim_btn)
+    style_button!(clim_apply_btn)
     style_slider!(slice_slider)
     style_slider!(sigma_slider)
 
@@ -442,7 +529,7 @@ function carta(
         halign    = :left,
         tellwidth = false,
     )
-    ui_status = Observable("Ready.")
+    ui_status = Observable(" ")
     main_grid[4, 1:2] = Label(
         main_grid[4, 1:2];
         text = ui_status,
@@ -500,7 +587,13 @@ function carta(
         end
     end
 
-    refresh_all!() = (refresh_uv!(); refresh_labels!(); refresh_spectrum!())
+    function refresh_axis_labels!()
+        xlab, ylab = slice_axis_labels(axis[])
+        ax_img.xlabel[] = xlab
+        ax_img.ylabel[] = ylab
+    end
+
+    refresh_all!() = (refresh_axis_labels!(); refresh_uv!(); refresh_labels!(); refresh_spectrum!())
 
     # ---------- Reactivity ----------
     on(clims_obs) do (cmin, cmax)
@@ -817,13 +910,16 @@ function carta(
             out  = joinpath(save_root, make_name(get_box_str(fname_box), ext))
             try
                 f_slice = CairoMakie.Figure(size = (700, 560))
+                xlab_s, ylab_s = slice_axis_labels(axis[])
                 axS = CairoMakie.Axis(
                     f_slice[1, 1];
                     title     = make_slice_title(fname, axis[], idx[]),
-                    xlabel    = L"\text{pixel } x",
-                    ylabel    = L"\text{pixel } y",
+                    xlabel    = xlab_s,
+                    ylabel    = ylab_s,
                     aspect    = CairoMakie.DataAspect(),
                     yreversed = true,
+                    xtickformat = latex_tick_formatter,
+                    ytickformat = latex_tick_formatter,
                 )
                 hmS = CairoMakie.heatmap!(axS, slice_disp[]; colormap = cm_obs[], colorrange = clims_obs[])
                 axS.xgridvisible[] = show_grid[]
@@ -847,7 +943,7 @@ function carta(
                 end
                 CairoMakie.Colorbar(f_slice[1, 2], hmS; label = "intensity", width = 20)
 
-                CairoMakie.save(String(out), f_slice)
+                CairoMakie.save(String(out), f_slice; backend = CairoMakie)
                 @info "Saved image" out
                 set_status!("Saved image to $(out).")
             catch e
@@ -873,11 +969,13 @@ function carta(
                     title  = make_spec_title(i_idx[], j_idx[], k_idx[]),
                     xlabel = L"\text{index along slice axis}",
                     ylabel = L"\text{intensity}",
+                    xtickformat = latex_tick_formatter,
+                    ytickformat = latex_tick_formatter,
                 )
                 CairoMakie.lines!(axP, spec_x_raw[], spec_y_disp[])
                 CairoMakie.xlims!(axP, 0f0, Float32(max(0, length(spec_x_raw[]) - 1)))
 
-                CairoMakie.save(String(out), f_spec)
+                CairoMakie.save(String(out), f_spec; backend = CairoMakie)
                 @info "Saved spectrum" out
                 set_status!("Saved spectrum to $(out).")
             catch e
