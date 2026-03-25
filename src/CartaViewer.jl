@@ -163,9 +163,9 @@ function carta(
     end
 
     style_button!(btn) = begin
-        btn.height[] = 32
+        btn.height[] = 28
         btn.cornerradius[] = 8
-        btn.strokewidth[] = 1.3
+        btn.strokewidth[] = 1.1
         btn.strokecolor[] = ui_border
         btn.buttoncolor[] = ui_surface
         btn.buttoncolor_hover[] = ui_surface_hover
@@ -173,19 +173,19 @@ function carta(
         btn.labelcolor[] = ui_text
         btn.labelcolor_hover[] = ui_text
         btn.labelcolor_active[] = ui_text
-        btn.fontsize[] = 18
-        btn.padding[] = (12, 12, 8, 8)
+        btn.fontsize[] = 14
+        btn.padding[] = (10, 10, 6, 6)
         btn
     end
 
     style_menu!(menu) = begin
-        menu.height[] = 34
-        menu.width[] = max(menu.width[], 106)
+        menu.height[] = 30
+        menu.width[] = max(menu.width[], 92)
         menu.textcolor[] = ui_text
-        menu.fontsize[] = 18
+        menu.fontsize[] = 14
         menu.dropdown_arrow_color[] = ui_text_muted
-        menu.dropdown_arrow_size[] = 12
-        menu.textpadding[] = (10, 10, 8, 8)
+        menu.dropdown_arrow_size[] = 10
+        menu.textpadding[] = (8, 8, 6, 6)
         menu.cell_color_inactive_even[] = ui_surface
         menu.cell_color_inactive_odd[] = ui_surface
         menu.selection_cell_color_inactive[] = ui_surface
@@ -195,8 +195,8 @@ function carta(
     end
 
     style_textbox!(tb) = begin
-        tb.height[] = 34
-        tb.fontsize[] = 18
+        tb.height[] = 30
+        tb.fontsize[] = 14
         tb.textcolor[] = ui_text
         tb.textcolor_placeholder[] = ui_text_muted
         tb.boxcolor[] = ui_surface
@@ -205,9 +205,9 @@ function carta(
         tb.bordercolor[] = ui_border
         tb.bordercolor_hover[] = ui_accent_dim
         tb.bordercolor_focused[] = ui_accent
-        tb.borderwidth[] = 1.6
+        tb.borderwidth[] = 1.3
         tb.cornerradius[] = 8
-        tb.textpadding[] = (10, 10, 8, 8)
+        tb.textpadding[] = (8, 8, 6, 6)
         tb
     end
 
@@ -389,10 +389,10 @@ function carta(
     im_row1 = img_ctrl_grid[1, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row1, 10)
 
-    Label(im_row1[1, 1], text = L"\text{Image scale}", halign = :left, tellwidth = false)
+    Label(im_row1[1, 1], text = L"\text{Image scale}", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     img_scale_menu = Menu(im_row1[1, 2]; options = ["lin", "log10", "ln"], prompt = "lin", width = 92)
 
-    Label(im_row1[1, 3], text = L"\text{Spectrum scale}", halign = :left, tellwidth = false)
+    Label(im_row1[1, 3], text = L"\text{Spectrum scale}", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     spec_scale_menu = Menu(im_row1[1, 4]; options = ["lin", "log10", "ln"], prompt = "lin", width = 92)
 
     reset_zoom_btn = Button(im_row1[1, 5]; label = "Reset zoom", width = 130, height = 30)
@@ -403,7 +403,7 @@ function carta(
     im_row2 = img_ctrl_grid[2, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row2, 10)
 
-    Label(im_row2[1, 1], text = L"\text{Save}", halign = :left, tellwidth = false)
+    Label(im_row2[1, 1], text = L"\text{Save}", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     fmt_menu  = Menu(im_row2[1, 2]; options = ["png", "pdf"], prompt = "png", width = 92)
     fname_box = Textbox(im_row2[1, 3]; placeholder = "filename base", width = 220, height = 30)
     btn_save_img  = Button(im_row2[1, 4]; label = "Save image", width = 136, height = 30)
@@ -417,7 +417,7 @@ function carta(
     im_row3 = img_ctrl_grid[3, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row3, 10)
 
-    Label(im_row3[1, 1], text = L"\text{GIF indices}", halign = :left, tellwidth = false)
+    Label(im_row3[1, 1], text = L"\text{GIF indices}", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     start_box = Textbox(im_row3[1, 2]; placeholder = "start", width = 90, height = 30)
     stop_box  = Textbox(im_row3[1, 3]; placeholder = "stop",  width = 90, height = 30)
     step_box  = Textbox(im_row3[1, 4]; placeholder = "step",  width = 90, height = 30)
@@ -429,7 +429,7 @@ function carta(
     im_row4 = img_ctrl_grid[4, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row4, 10)
 
-    Label(im_row4[1, 1], text = L"\text{Colorbar limits}", halign = :left, tellwidth = false)
+    Label(im_row4[1, 1], text = L"\text{Colorbar limits}", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     clim_min_box   = Textbox(im_row4[1, 2]; placeholder = "min", width = 130, height = 30)
     clim_max_box   = Textbox(im_row4[1, 3]; placeholder = "max", width = 130, height = 30)
     clim_apply_btn = Button(im_row4[1, 4], label = "Apply", width = 90, height = 30)
@@ -447,7 +447,7 @@ function carta(
     im_row5 = img_ctrl_grid[5, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row5, 10)
 
-    Label(im_row5[1, 1], text = L"\text{Slice axis}", halign = :left, tellwidth = false)
+    Label(im_row5[1, 1], text = L"\text{Slice axis}", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     axes_labels = ["dim1 (x)", "dim2 (y)", "dim3 (z)"]
     axis_menu = Menu(im_row5[1, 2]; options = axes_labels, prompt = "dim3 (z)", width = 122)
     status_label = Label(
@@ -457,7 +457,7 @@ function carta(
         halign    = :left,
         tellwidth = false,
     )
-    Label(im_row5[1, 4], text = L"\text{Index}", halign = :left, tellwidth = false)
+    Label(im_row5[1, 4], text = L"\text{Index}", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     slice_slider = Slider(im_row5[1, 5]; range = 1:siz[3], startvalue = 1, width = 260, height = 10)
 
     foreach(c -> colsize!(im_row5, c, Auto()), 1:5)
@@ -465,7 +465,7 @@ function carta(
     # Sigma control (toggle moved to the right panel)
     im_row6 = img_ctrl_grid[6, 1:2] = GridLayout(; alignmode = Outside())
     colgap!(im_row6, 10)
-    Label(im_row6[1, 1], text = L"\text{Gaussian }\sigma", halign = :left, tellwidth = false)
+    Label(im_row6[1, 1], text = L"\text{Gaussian }\sigma", halign = :left, tellwidth = false, fontsize = 16, color = ui_text)
     sigma_label = Label(
         im_row6[1, 2];
         text      = latexstring("\\sigma = 1.5\\,\\text{px}"),
@@ -523,10 +523,12 @@ function carta(
     crosshair_chk.checked[] = show_crosshair[]
     marker_chk.checked[] = show_marker[]
     grid_chk.checked[] = show_grid[]
-    main_grid[3, 1:2] = Label(
-        main_grid[3, 1:2];
+    main_grid[3, 2] = Label(
+        main_grid[3, 2];
         text      = "Shortcuts: arrow keys move the crosshair, left click picks a voxel, right-drag draws a zoom box, press 'i' to invert the colormap.",
-        halign    = :left,
+        halign    = :right,
+        fontsize  = 15,
+        color     = ui_text_muted,
         tellwidth = false,
     )
     ui_status = Observable(" ")
