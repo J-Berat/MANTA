@@ -16,6 +16,11 @@ using FITSIO
 # ---- helpers ----
 include("helpers/Helpers.jl")
 
+# ---- HEALPix viewer ----
+import Statistics: quantile
+include("CartaHealpix.jl")
+export carta_healpix, is_healpix_fits, read_healpix_map, mollweide_grid
+
 spawn_safely(f::Function) = @async try f() catch e
     @error "Background task failed" exception=(e, catch_backtrace())
 end
@@ -23,22 +28,34 @@ end
 export carta
 
 """
-    carta(filepath::String;
-          cmap::Symbol = :viridis,
-          vmin = nothing, vmax = nothing,
-          invert::Bool = false,
-          figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
-          save_dir::Union{Nothing,AbstractString} = nothing,
-          activate_gl::Bool = true,
-          display_fig::Bool = true,
-          settings_path::Union{Nothing,AbstractString} = nothing)
+    carta(filepath::String; kwargs...)
 
-Interactive 3D FITS viewer (slice + per-voxel spectrum).
-- Manual color limits when `vmin` & `vmax` set (also sync spectrum Y).
+Interactive FITS viewer. **Dispatches automatically** based on file content :
+
+- **3D cube** → slice + per-voxel spectrum viewer (default behavior).
+- **HEALPix map** (header has `PIXTYPE = 'HEALPIX'`) → Mollweide
+  projection with right-drag zoom (delegates to `carta_healpix`).
+
+Common kwargs:
+- `cmap`, `vmin`, `vmax`, `invert`, `figsize`, `save_dir`,
+  `activate_gl`, `display_fig`.
+
+Cube-only kwargs:
+- `settings_path`.
+
+HEALPix-only kwargs:
+- `column` : column index in the BinTable (default 1).
+- `nx`, `ny` : Mollweide grid resolution (default 1400×700).
+- `scale` : `:lin | :log10 | :ln` (default `:lin`).
+
+Notes:
+- Manual color limits when `vmin` & `vmax` set (also sync spectrum Y for
+  cubes).
 - Window sized by explicit `figsize=(w,h)` or a fallback default.
-- Export directory configurable via `save_dir`; defaults to your Desktop if
-  it exists, otherwise the current working directory.
-- `activate_gl=false` allows smoke tests without requiring an OpenGL context.
+- Export directory configurable via `save_dir`; defaults to your Desktop
+  if it exists, otherwise the current working directory.
+- `activate_gl=false` allows smoke tests without requiring an OpenGL
+  context.
 - `display_fig=false` skips window display (useful for automated tests).
 """
 function carta(
@@ -51,12 +68,28 @@ function carta(
     save_dir::Union{Nothing,AbstractString} = nothing,
     activate_gl::Bool = true,
     display_fig::Bool = true,
-    settings_path::Union{Nothing,AbstractString} = nothing
+    settings_path::Union{Nothing,AbstractString} = nothing,
+    # HEALPix-specific options (ignorés pour les cubes)
+    column::Int = 1,
+    nx::Int = 1400,
+    ny::Int = 700,
+    scale::Symbol = :lin,
     )
 
     # ---------- Load ----------
     if !isfile(filepath)
         throw(ArgumentError("FITS file not found: $(abspath(filepath))"))
+    end
+
+    # ---- Dispatch HEALPix vs cube 3D ----
+    if is_healpix_fits(filepath)
+        @info "Detected HEALPix map → using carta_healpix"
+        return carta_healpix(filepath;
+            cmap=(cmap === :viridis ? :inferno : cmap),
+            vmin=vmin, vmax=vmax, invert=invert,
+            scale=scale, column=column, nx=nx, ny=ny,
+            figsize=figsize, save_dir=save_dir,
+            activate_gl=activate_gl, display_fig=display_fig)
     end
 
     cube = try
