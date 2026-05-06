@@ -11,6 +11,8 @@ using Makie
 using LaTeXStrings
 using ColorTypes
 using FITSIO
+using Statistics: mean
+using Healpix
 
 @testset "helpers: scaling" begin
     A = Float32.([1, 10, 100, 0, -1])
@@ -39,6 +41,18 @@ using FITSIO
 
     mn4, mx4 = CartaViewer.clamped_extrema(Float32.([]))
     @test mn4 == 0f0 && mx4 == 1f0
+
+    p1, p99 = CartaViewer.percentile_clims(Float32.(1:100), 1, 99)
+    @test p1 >= 1f0 && p99 <= 100f0 && p1 < p99
+
+    hx, hy = CartaViewer.histogram_counts(Float32.(1:10); bins = 5)
+    @test length(hx) == 5
+    @test length(hy) == 5
+    @test sum(hy) == 10f0
+
+    levels = CartaViewer.automatic_contour_levels(Float32.(1:100); n = 6)
+    @test length(levels) == 6
+    @test issorted(levels)
 end
 
 @testset "helpers: mapping" begin
@@ -60,6 +74,20 @@ end
     @test size(s2) == (size(data, 1), size(data, 3))
     @test size(s3) == (size(data, 1), size(data, 2))
     @test eltype(s1) == Float32 && eltype(s2) == Float32 && eltype(s3) == Float32
+
+    box_uv = CartaViewer.region_uv_indices(10, 10, 2, 3, 4, 5, :box)
+    @test (3, 2) in box_uv
+    @test (5, 4) in box_uv
+
+    circle_uv = CartaViewer.region_uv_indices(10, 10, 5, 5, 7, 5, :circle)
+    @test (5, 5) in circle_uv
+    @test (5, 7) in circle_uv
+    @test (1, 1) ∉ circle_uv
+
+    cube = reshape(Float32.(1:24), 2, 3, 4)
+    spec = CartaViewer.mean_region_spectrum(cube, 3, [(1, 1), (2, 1)])
+    @test length(spec) == 4
+    @test spec[1] == mean(Float32[cube[1, 1, 1], cube[2, 1, 1]])
 end
 
 @testset "healpix: mollweide graticule geometry" begin
@@ -72,6 +100,31 @@ end
         @test isapprox(lon2, lon; atol=1e-4)
         @test isapprox(lat2, lat; atol=1e-4)
     end
+end
+
+@testset "healpix: projected regions" begin
+    grid = Int32[
+        0 1 1 2
+        3 3 4 0
+        5 6 6 7
+    ]
+    box_ips = CartaViewer.projected_region_ipix(grid, -2, -1, 2, 1, :box)
+    @test box_ips == [1, 2, 3, 4, 5, 6, 7]
+
+    circle_ips = CartaViewer.projected_region_ipix(grid, 0, 0, 1, 0, :circle)
+    @test all(>(0), circle_ips)
+    @test issorted(circle_ips)
+
+    vals = Float32[10, 20, NaN32, 40]
+    @test CartaViewer.healpix_region_mean(vals, [1, 2, 3]) == 15f0
+
+    cube = Float32[
+        1 10 100
+        3 30 300
+        NaN 40 400
+    ]
+    spec = CartaViewer.healpix_region_mean_spectrum(cube, [1, 2, 3], 3)
+    @test spec == Float32[2, 80 / 3, 800 / 3]
 end
 
 @testset "helpers: latex" begin
@@ -121,7 +174,7 @@ end
     # explicit override
     @test CartaViewer._pick_fig_size((111, 222)) == (111, 222)
     # default when no explicit size is provided
-    @test CartaViewer._pick_fig_size(nothing) == (1800, 900)
+    @test CartaViewer._pick_fig_size(nothing) == (1800, 1000)
 end
 
 @testset "helpers: validation" begin
@@ -150,6 +203,53 @@ end
 
     gok3, _, _, _ = CartaViewer.parse_gif_request("1", "5", "0", "12", 10)
     @test !gok3
+
+    cok, cmanual, clevels, _ = CartaViewer.parse_contour_levels("1, 2  3")
+    @test cok && cmanual
+    @test clevels == Float32[1, 2, 3]
+
+    cok2, cmanual2, _, _ = CartaViewer.parse_contour_levels("")
+    @test cok2 && !cmanual2
+
+    cok3, _, _, _ = CartaViewer.parse_contour_levels("1, nope")
+    @test !cok3
+
+    sok, smanual, slevels, scolors, _ = CartaViewer.parse_contour_specs("3:blue, 1:red, 2:#00ffaa")
+    @test sok && smanual
+    @test slevels == Float32[1, 2, 3]
+    @test scolors == ["red", "#00ffaa", "blue"]
+    @test CartaViewer.format_contour_specs(slevels, scolors) == "1:red, 2:#00ffaa, 3:blue"
+
+    color_values = CartaViewer.contour_color_values(scolors, length(slevels), RGBAf(0, 0, 0, 1))
+    @test length(color_values) == 3
+
+    bad_color, _, _, _, _ = CartaViewer.parse_contour_specs("1:not_a_color")
+    @test !bad_color
+end
+
+@testset "helpers: simple wcs" begin
+    header = Dict{String,Any}(
+        "CTYPE1" => "RA---TAN",
+        "CUNIT1" => "deg",
+        "CRVAL1" => 120.0,
+        "CRPIX1" => 1.0,
+        "CDELT1" => -0.5,
+        "CTYPE2" => "DEC--TAN",
+        "CUNIT2" => "deg",
+        "CRVAL2" => -30.0,
+        "CRPIX2" => 2.0,
+        "CDELT2" => 0.25,
+    )
+    wcs = CartaViewer.read_simple_wcs(header, 3)
+    @test CartaViewer.has_wcs(wcs, 1)
+    @test CartaViewer.has_wcs(wcs, 2)
+    @test !CartaViewer.has_wcs(wcs, 3)
+    @test CartaViewer.world_coord(wcs, 1, 3) == 119.0
+    @test occursin("RA", String(CartaViewer.wcs_axis_label(wcs, 1)))
+    @test occursin("RA---TAN", CartaViewer.format_world_coord(wcs, 1, 1))
+    @test CartaViewer.data_unit_label(Dict{String,Any}("BUNIT" => "K")) == "K"
+    @test CartaViewer.data_unit_label(Dict{String,Any}("BUNIT" => "   ")) == "value"
+    @test CartaViewer.data_unit_label(nothing) == "value"
 end
 
 @testset "helpers: settings io" begin
@@ -191,6 +291,38 @@ end
         )
         @test fig isa Makie.Figure
         CartaViewer.forget!(fig)
+
+        hpix_ppv_path = joinpath(tmp, "healpix_ppv.fits")
+        hpix_ppv = reshape(Float32.(1:48), 12, 4)
+        FITS(hpix_ppv_path, "w") do f
+            write(f, hpix_ppv)
+        end
+        fig_hpix = CartaViewer.carta_healpix_cube(
+            hpix_ppv_path;
+            activate_gl = false,
+            display_fig = false,
+            save_dir = tmp,
+            nx = 100,
+            ny = 50,
+            figsize = (800, 560),
+        )
+        @test fig_hpix isa Makie.Figure
+        CartaViewer.forget!(fig_hpix)
+
+        hpix_map_path = joinpath(tmp, "healpix_map.fits")
+        hpix_map = HealpixMap{Float64,RingOrder,Vector{Float64}}(collect(1.0:12.0))
+        Healpix.saveToFITS(hpix_map, hpix_map_path; unit = "K")
+        fig_map = CartaViewer.carta_healpix(
+            hpix_map_path;
+            activate_gl = false,
+            display_fig = false,
+            save_dir = tmp,
+            nx = 100,
+            ny = 50,
+            figsize = (800, 560),
+        )
+        @test fig_map isa Makie.Figure
+        CartaViewer.forget!(fig_map)
 
         missing = joinpath(tmp, "does_not_exist.fits")
         @test_throws ArgumentError CartaViewer.carta(missing; activate_gl = false, display_fig = false)

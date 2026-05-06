@@ -116,6 +116,106 @@ function mollweide_pixel_index(res::Healpix.Resolution, nx::Int, ny::Int)
     idx
 end
 
+function projected_region_segments(p0::Point2f, p1::Point2f, shape::Symbol)
+    if !(isfinite(p0[1]) && isfinite(p0[2]) && isfinite(p1[1]) && isfinite(p1[2]))
+        return Point2f[]
+    end
+    x0, y0 = p0
+    x1, y1 = p1
+    if shape === :circle
+        r = hypot(x1 - x0, y1 - y0)
+        r < 1f-5 && return Point2f[]
+        return Point2f[Point2f(x0 + r * cos(t), y0 + r * sin(t)) for t in LinRange(0, 2π, 97)]
+    else
+        return Point2f[
+            Point2f(x0, y0), Point2f(x1, y0),
+            Point2f(x1, y1), Point2f(x0, y1),
+            Point2f(x0, y0),
+        ]
+    end
+end
+
+function projected_region_ipix(
+    ipix_grid::AbstractMatrix{<:Integer},
+    x0::Real,
+    y0::Real,
+    x1::Real,
+    y1::Real,
+    shape::Symbol,
+)
+    ny, nx = size(ipix_grid)
+    if nx < 1 || ny < 1
+        return Int[]
+    end
+    xmin, xmax = minmax(Float64(x0), Float64(x1))
+    ymin, ymax = minmax(Float64(y0), Float64(y1))
+    if shape !== :circle && (abs(xmax - xmin) < 1e-5 || abs(ymax - ymin) < 1e-5)
+        return Int[]
+    end
+    if shape === :circle
+        cx, cy = Float64(x0), Float64(y0)
+        r = hypot(Float64(x1) - cx, Float64(y1) - cy)
+        r < 1e-5 && return Int[]
+        xmin, xmax = cx - r, cx + r
+        ymin, ymax = cy - r, cy + r
+        rr = r * r
+        inside = (x, y) -> (x - cx)^2 + (y - cy)^2 <= rr
+    else
+        inside = (x, y) -> xmin <= x <= xmax && ymin <= y <= ymax
+    end
+    ix0 = clamp(Int(floor((xmin + 2.0) / 4.0 * nx + 1)), 1, nx)
+    ix1 = clamp(Int(ceil((xmax + 2.0) / 4.0 * nx + 1)), 1, nx)
+    iy0 = clamp(Int(floor((ymin + 1.0) / 2.0 * ny + 1)), 1, ny)
+    iy1 = clamp(Int(ceil((ymax + 1.0) / 2.0 * ny + 1)), 1, ny)
+    seen = Set{Int}()
+    @inbounds for j in iy0:iy1, i in ix0:ix1
+        x = 2 * (2 * (i - 0.5) / nx - 1)
+        y = 2 * (j - 0.5) / ny - 1
+        inside(x, y) || continue
+        ip = Int(ipix_grid[j, i])
+        ip > 0 && push!(seen, ip)
+    end
+    return sort!(collect(seen))
+end
+
+function healpix_region_mean(vals, ipixels)
+    isempty(ipixels) && return Float32(NaN)
+    acc = 0.0
+    cnt = 0
+    @inbounds for ip in ipixels
+        if 1 <= ip <= length(vals)
+            v = vals[ip]
+            fv = Float32(v)
+            if isfinite(fv) && fv != Float32(Healpix.UNSEEN)
+                acc += Float64(fv)
+                cnt += 1
+            end
+        end
+    end
+    return cnt == 0 ? Float32(NaN) : Float32(acc / cnt)
+end
+
+function healpix_region_mean_spectrum(cube::AbstractMatrix, ipixels, nv::Int)
+    y = fill(Float32(NaN), nv)
+    isempty(ipixels) && return y
+    @inbounds for j in 1:nv
+        acc = 0.0
+        cnt = 0
+        for ip in ipixels
+            if 1 <= ip <= size(cube, 1)
+                v = cube[ip, j]
+                fv = Float32(v)
+                if isfinite(fv) && fv != Float32(Healpix.UNSEEN)
+                    acc += Float64(fv)
+                    cnt += 1
+                end
+            end
+        end
+        y[j] = cnt == 0 ? Float32(NaN) : Float32(acc / cnt)
+    end
+    return y
+end
+
 @inline function mollweide_lonlat_to_xy(lon_deg::Real, lat_deg::Real)
     lat = deg2rad(clamp(Float64(lat_deg), -90.0, 90.0))
     lon = deg2rad(clamp(Float64(lon_deg), -180.0, 180.0))
@@ -140,12 +240,20 @@ _angle_label(v::Real) = begin
     r == 0 ? "0°" : "$(r)°"
 end
 
+_latex_tick(v::Real) = begin
+    x = abs(Float64(v)) < 1e-10 ? 0.0 : Float64(v)
+    r = round(x)
+    s = abs(x - r) < 1e-8 ? string(Int(r)) : string(round(x; digits=2))
+    latexstring("\\mathrm{", latex_safe(s), "}")
+end
+_latex_tick_formatter(vals) = [_latex_tick(v) for v in vals]
+
 function draw_mollweide_graticule!(
     ax;
     lon_values = -150:30:150,
     lat_values = -60:30:60,
     line_color = RGBAf(1, 1, 1, 0.30),
-    label_color = RGBAf(1, 1, 1, 0.62),
+    label_color = RGBAf(0, 0, 0, 0.85),
     linewidth::Real = 0.9,
     fontsize::Real = 12,
 )
@@ -451,10 +559,13 @@ function carta_healpix(
     fname_full = basename(filepath)
     fname = String(replace(fname_full, r"\.fits(\.gz)?$" => ""))
 
-    unit_str = String(get(hdr, "TUNIT$column", get(hdr, "BUNIT", "")))
+    unit_str = strip(String(get(hdr, "TUNIT$column", get(hdr, "BUNIT", ""))))
+    unit_label = isempty(unit_str) ? "value" : unit_str
+    unit_label_tex = latexstring("\\text{", latex_safe(unit_label), "}")
 
     # ---------- Reprojection (une seule fois, conservée en mémoire) ----------
     img_raw = mollweide_grid(m; nx=nx, ny=ny)
+    ipix_grid = mollweide_pixel_index(m.resolution, nx, ny)
 
     # ---------- État ----------
     cmap_name   = Observable(cmap)
@@ -499,10 +610,37 @@ function carta_healpix(
         end
     end
 
+    contour_auto_levels = lift(img_disp) do im
+        automatic_contour_levels(im; n = 7)
+    end
+    contour_use_manual = Observable(false)
+    contour_manual_levels = Observable(Float32[])
+    contour_manual_colors = Observable(String[])
+    contour_levels_obs = lift(contour_use_manual, contour_manual_levels, contour_auto_levels) do use_man, manual, auto
+        use_man && !isempty(manual) ? manual : auto
+    end
+    contour_default_color = RGBAf(0, 0, 0, 0.62)
+    contour_colors_obs = lift(contour_levels_obs, contour_use_manual, contour_manual_colors) do levels, use_man, colors
+        contour_color_values(use_man ? colors : String[], length(levels), contour_default_color)
+    end
+    show_contours = Observable(false)
+
+    hist_pair_obs = lift(img_disp, clims_auto) do im, lim
+        histogram_counts(im; bins = 64, limits = lim)
+    end
+    hist_x_obs = lift(p -> p[1], hist_pair_obs)
+    hist_y_obs = lift(p -> p[2], hist_pair_obs)
+
     zoom_drag_active = Observable(false)
     zoom_drag_start  = Observable(Point2f(NaN32, NaN32))
     zoom_drag_end    = Observable(Point2f(NaN32, NaN32))
     show_graticule   = Observable(true)
+    selection_mode = Observable(:point)
+    region_shape = Observable(:box)
+    region_drag_active = Observable(false)
+    region_start = Observable(Point2f(NaN32, NaN32))
+    region_end = Observable(Point2f(NaN32, NaN32))
+    region_ipix = Observable(Int[])
 
     ui_accent = RGBf(0.12, 0.45, 0.82)
 
@@ -529,6 +667,9 @@ function carta_healpix(
     end
     hm = heatmap!(ax_img, xs, ys, img_for_plot;
                   colormap=cm_obs, colorrange=clims_safe, nan_color=:white)
+    contour!(ax_img, xs, ys, img_for_plot;
+             levels=contour_levels_obs, color=contour_colors_obs, linewidth=1.1,
+             visible=show_contours)
     full_map_bounds = (-2.0, 2.0, -1.0, 1.0)
     set_mollweide_view!(ax_img, full_map_bounds...)
     graticule = draw_mollweide_graticule!(ax_img)
@@ -555,9 +696,13 @@ function carta_healpix(
     end
     linesegments!(ax_img, zoom_box_segments; color=(ui_accent, 0.95),
                   linewidth=2.0, linestyle=:dash)
+    region_segments = lift(region_start, region_end, region_shape, region_ipix, region_drag_active) do p0, p1, shape, ipixs, dragging
+        (dragging || !isempty(ipixs)) ? projected_region_segments(p0, p1, shape) : Point2f[]
+    end
+    lines!(ax_img, region_segments; color=(RGBf(1.0, 0.70, 0.12), 0.98), linewidth=2.3)
 
     Colorbar(main_grid[1, 2], hm;
-             label = isempty(unit_str) ? L"\text{value}" : latexstring("\\text{", latex_safe(unit_str), "}"),
+             label = unit_label_tex,
              width = 18)
 
     # Bandeau info
@@ -565,7 +710,20 @@ function carta_healpix(
     Label(main_grid[2, 1:2], info_obs; halign=:left, fontsize=15)
 
     # Contrôles
-    ctrl = main_grid[3, 1:2] = GridLayout(; alignmode=Outside())
+    ax_hist = Axis(
+        main_grid[3, 1:2];
+        title = L"\text{Visible map histogram}",
+        xlabel = unit_label_tex,
+        ylabel = L"\text{count}",
+        height = 120,
+        xtickformat = _latex_tick_formatter,
+        ytickformat = _latex_tick_formatter,
+    )
+    lines!(ax_hist, hist_x_obs, hist_y_obs; color=ui_accent, linewidth=1.5)
+    vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe);
+            color=(:black, 0.45), linewidth=1.0, linestyle=:dash)
+
+    ctrl = main_grid[4, 1:2] = GridLayout(; alignmode=Outside())
     Label(ctrl[1,1], text=L"\text{Scale}", halign=:left, tellwidth=false, fontsize=15)
     scale_menu = Menu(ctrl[1,2]; options=["lin","log10","ln"],
                      prompt = String(scale), width=92)
@@ -577,17 +735,68 @@ function carta_healpix(
     clim_min_box = Textbox(ctrl[1,6]; placeholder="min", width=110, height=30)
     clim_max_box = Textbox(ctrl[1,7]; placeholder="max", width=110, height=30)
     apply_btn    = Button(ctrl[1,8]; label="Apply", width=80, height=30)
-    graticule_chk = Checkbox(ctrl[1,9])
-    Label(ctrl[1,10], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
+    auto_btn     = Button(ctrl[1,9]; label="Auto", width=76, height=30)
+    p1_btn       = Button(ctrl[1,10]; label="p1-p99", width=88, height=30)
+    p5_btn       = Button(ctrl[1,11]; label="p5-p95", width=88, height=30)
+    graticule_chk = Checkbox(ctrl[1,12])
+    Label(ctrl[1,13], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
     graticule_chk.checked[] = show_graticule[]
-    reset_zoom_btn = Button(ctrl[1,11]; label="Reset zoom", width=120, height=30)
-    save_btn       = Button(ctrl[1,12]; label="Save PNG", width=120, height=30)
+    reset_zoom_btn = Button(ctrl[1,14]; label="Reset zoom", width=120, height=30)
+    save_btn       = Button(ctrl[1,15]; label="Save PNG", width=120, height=30)
+
+    Label(ctrl[2,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
+    region_mode_menu = Menu(ctrl[2,2]; options=["point", "box", "circle"], prompt="point", width=108)
+    region_clear_btn = Button(ctrl[2,3]; label="Clear region", width=126, height=30)
+    region_count_label = Label(ctrl[2,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[2,5], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
+    contour_chk = Checkbox(ctrl[2,6])
+    Label(ctrl[2,7], text="Show", halign=:left, tellwidth=false, fontsize=15)
+    contour_levels_box = Textbox(ctrl[2,8]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
+    contour_apply_btn = Button(ctrl[2,9]; label="Apply", width=80, height=30)
+    contour_chk.checked[] = show_contours[]
 
     if use_manual[]
         a, b = clims_manual[]
         s_a = string(a); s_b = string(b)
         clim_min_box.displayed_string[] = s_a; clim_min_box.stored_string[] = s_a
         clim_max_box.displayed_string[] = s_b; clim_max_box.stored_string[] = s_b
+    end
+
+    set_box_text!(tb, s::AbstractString) = begin
+        str = String(s)
+        tb.displayed_string[] = str
+        tb.stored_string[] = str
+        nothing
+    end
+    function clear_region!()
+        region_ipix[] = Int[]
+        region_start[] = Point2f(NaN32, NaN32)
+        region_end[] = Point2f(NaN32, NaN32)
+        region_drag_active[] = false
+        region_count_label.text[] = "0 pix"
+        nothing
+    end
+    function apply_region!(p0::Point2f, p1::Point2f)
+        ips = projected_region_ipix(ipix_grid, p0[1], p0[2], p1[1], p1[2], region_shape[])
+        region_ipix[] = ips
+        region_count_label.text[] = "$(length(ips)) pix"
+        mean_val = healpix_region_mean(m.pixels, ips)
+        valstr = isfinite(mean_val) ? string(round(mean_val; digits=4)) : "NaN"
+        shape = region_shape[] === :circle ? "circle" : "box"
+        info_obs[] = latexstring(
+            "\\text{region ", shape, "}\\;N=", length(ips),
+            "\\;\\text{mean}=", valstr,
+            "\\;\\mathrm{", latex_safe(unit_label), "}"
+        )
+        nothing
+    end
+    function apply_percentile_clims!(lo::Real, hi::Real)
+        clims = percentile_clims(img_disp[], lo, hi)
+        clims_manual[] = clims
+        use_manual[] = true
+        set_box_text!(clim_min_box, string(first(clims)))
+        set_box_text!(clim_max_box, string(last(clims)))
+        nothing
     end
 
     # ---------- Reactivity ----------
@@ -615,6 +824,42 @@ function carta_healpix(
             use_manual[] = false
         end
     end
+    on(auto_btn.clicks) do _
+        use_manual[] = false
+        set_box_text!(clim_min_box, "")
+        set_box_text!(clim_max_box, "")
+    end
+    on(p1_btn.clicks) do _; apply_percentile_clims!(1, 99); end
+    on(p5_btn.clicks) do _; apply_percentile_clims!(5, 95); end
+    on(region_mode_menu.selection) do sel
+        sel === nothing && return
+        mode = Symbol(String(sel))
+        mode in (:point, :box, :circle) || return
+        selection_mode[] = mode
+        region_shape[] = mode === :circle ? :circle : :box
+        mode === :point && clear_region!()
+    end
+    on(region_clear_btn.clicks) do _
+        clear_region!()
+        info_obs[] = latexstring("\\text{region cleared}")
+    end
+    on(contour_chk.checked) do v
+        show_contours[] = v
+    end
+    on(contour_apply_btn.clicks) do _
+        ok, use_man, levels, colors, _msg = parse_contour_specs(
+            get_box_str(contour_levels_box);
+            fallback_levels=contour_manual_levels[],
+            fallback_colors=contour_manual_colors[],
+        )
+        ok || return
+        contour_use_manual[] = use_man
+        contour_manual_levels[] = levels
+        contour_manual_colors[] = colors
+        set_box_text!(contour_levels_box, use_man ? format_contour_specs(levels, colors) : "")
+        show_contours[] = true
+        contour_chk.checked[] = true
+    end
 
     # zoom right-drag, identique à `carta`
     on(events(ax_img).mousebutton) do ev
@@ -638,12 +883,33 @@ function carta_healpix(
             zoom_bounds = (Float64(xmin), Float64(xmax), Float64(ymin), Float64(ymax))
             set_mollweide_view!(ax_img, zoom_bounds...)
             refresh_graticule_labels!(graticule, ax_img; bounds=zoom_bounds)
+        elseif ev.button == Mouse.left && ev.action == Mouse.press && selection_mode[] != :point
+            p = mouseposition(ax_img); any(isnan, p) && return
+            mollweide_xy_to_lonlat(p[1], p[2]) === nothing && return
+            region_start[] = Point2f(p[1], p[2])
+            region_end[] = Point2f(p[1], p[2])
+            region_drag_active[] = true
+            region_ipix[] = Int[]
+        elseif ev.button == Mouse.left && ev.action == Mouse.release && region_drag_active[]
+            p = mouseposition(ax_img)
+            !any(isnan, p) && (region_end[] = Point2f(p[1], p[2]))
+            p0 = region_start[]; p1 = region_end[]
+            region_drag_active[] = false
+            if isfinite(p0[1]) && isfinite(p1[1])
+                apply_region!(p0, p1)
+            else
+                clear_region!()
+            end
         end
     end
     on(events(ax_img).mouseposition) do p
         if zoom_drag_active[] && !any(isnan, p)
             zoom_drag_end[] = Point2f(p[1], p[2])
+        elseif region_drag_active[] && !any(isnan, p)
+            region_end[] = Point2f(p[1], p[2])
         end
+        region_drag_active[] && return
+        !isempty(region_ipix[]) && return
         # info hover (l, b)
         ll = mollweide_xy_to_lonlat(p[1], p[2])
         if ll === nothing
@@ -662,8 +928,7 @@ function carta_healpix(
                 "(l, b) = (",
                 string(round(l_disp; digits=2)), "^\\circ, ",
                 string(round(b_deg; digits=2)), "^\\circ),\\;",
-                "\\text{value} = ", valstr,
-                isempty(unit_str) ? "" : ("\\;\\mathrm{", latex_safe(unit_str), "}")
+                "\\text{", latex_safe(unit_label), "} = ", valstr
             )
         end
     end
@@ -738,8 +1003,18 @@ function carta_healpix_cube(
 )
     isfile(filepath) || throw(ArgumentError("FITS file not found: $(abspath(filepath))"))
 
-    raw = FITS(filepath) do f; read(f[1]); end
+    header = nothing
+    raw = FITS(filepath) do f
+        header = try
+            read_header(f[1])
+        catch
+            nothing
+        end
+        read(f[1])
+    end
     ndims(raw) == 2 || throw(ArgumentError("Expected 2D array (npix×nv), got ndims=$(ndims(raw))"))
+    data_unit = data_unit_label(header; fallback="value")
+    data_unit_tex = latexstring("\\text{", latex_safe(data_unit), "}")
 
     s = size(raw)
     nside1 = valid_healpix_npix(s[1])
@@ -862,10 +1137,37 @@ function carta_healpix_cube(
         (isfinite(lo) && isfinite(hi) && lo != hi) ? (lo, hi) : (0f0, 1f0)
     end
 
+    contour_auto_levels = lift(img_disp) do im
+        automatic_contour_levels(im; n = 7)
+    end
+    contour_use_manual = Observable(false)
+    contour_manual_levels = Observable(Float32[])
+    contour_manual_colors = Observable(String[])
+    contour_levels_obs = lift(contour_use_manual, contour_manual_levels, contour_auto_levels) do use_man, manual, auto
+        use_man && !isempty(manual) ? manual : auto
+    end
+    contour_default_color = RGBAf(0, 0, 0, 0.62)
+    contour_colors_obs = lift(contour_levels_obs, contour_use_manual, contour_manual_colors) do levels, use_man, colors
+        contour_color_values(use_man ? colors : String[], length(levels), contour_default_color)
+    end
+    show_contours = Observable(false)
+
+    hist_pair_obs = lift(img_disp, clims_auto) do im, lim
+        histogram_counts(im; bins = 64, limits = lim)
+    end
+    hist_x_obs = lift(p -> p[1], hist_pair_obs)
+    hist_y_obs = lift(p -> p[2], hist_pair_obs)
+
     zoom_drag_active = Observable(false)
     zoom_drag_start  = Observable(Point2f(NaN32, NaN32))
     zoom_drag_end    = Observable(Point2f(NaN32, NaN32))
     show_graticule   = Observable(true)
+    selection_mode = Observable(:point)
+    region_shape = Observable(:box)
+    region_drag_active = Observable(false)
+    region_start = Observable(Point2f(NaN32, NaN32))
+    region_end = Observable(Point2f(NaN32, NaN32))
+    region_ipix = Observable(Int[])
 
     # Pixel sélectionné (initial : centre)
     sel_ipix  = Observable(0)
@@ -876,6 +1178,7 @@ function carta_healpix_cube(
     spec_y_obs = Observable(zeros(Float32, nv))
     function update_spectrum!(ip::Int)
         if 1 ≤ ip ≤ npix
+            region_ipix[] = Int[]
             sel_ipix[] = ip
             spec_y_obs[] = Float32.(@view cube[ip, :])
             θ, φ = Healpix.pix2angRing(res, ip)
@@ -885,6 +1188,21 @@ function carta_healpix_cube(
                 string(round(mod(l_deg, 360); digits=2)), "^\\circ, ",
                 string(round(b_deg; digits=2)), "^\\circ)")
         end
+    end
+
+    function update_region_spectrum!(ipixels)
+        ips = Int.(ipixels)
+        region_ipix[] = ips
+        spec_y_obs[] = healpix_region_mean_spectrum(cube, ips, nv)
+        shape = region_shape[] === :circle ? "circle" : "box"
+        j = clamp(chan_idx[], 1, nv)
+        mean_val = healpix_region_mean(@view(cube[:, j]), ips)
+        valstr = isfinite(mean_val) ? string(round(mean_val; digits=4)) : "NaN"
+        sel_label[] = latexstring(
+            "\\text{mean spectrum in ", shape, " region}\\;N=", length(ips),
+            "\\;\\text{channel mean}=", valstr,
+            "\\;\\mathrm{", latex_safe(data_unit), "}"
+        )
     end
 
     # ---------- Figure ----------
@@ -919,6 +1237,9 @@ function carta_healpix_cube(
     img_for_plot = lift(img_disp) do im; permutedims(im); end
     hm = heatmap!(ax_img, xs, ys, img_for_plot;
                   colormap=cm_obs, colorrange=clims_safe, nan_color=:white)
+    contour!(ax_img, xs, ys, img_for_plot;
+             levels=contour_levels_obs, color=contour_colors_obs, linewidth=1.1,
+             visible=show_contours)
     full_map_bounds = (-2.0, 2.0, -1.0, 1.0)
     set_mollweide_view!(ax_img, full_map_bounds...)
     graticule = draw_mollweide_graticule!(ax_img)
@@ -939,12 +1260,16 @@ function carta_healpix_cube(
     end
     linesegments!(ax_img, zoom_box_segments; color=(ui_accent,0.95),
                   linewidth=2.0, linestyle=:dash)
+    region_segments = lift(region_start, region_end, region_shape, region_ipix, region_drag_active) do p0, p1, shape, ipixs, dragging
+        (dragging || !isempty(ipixs)) ? projected_region_segments(p0, p1, shape) : Point2f[]
+    end
+    lines!(ax_img, region_segments; color=(RGBf(1.0, 0.70, 0.12), 0.98), linewidth=2.3)
     marker_pts = lift(sel_xy) do p
         (isfinite(p[1]) && isfinite(p[2])) ? Point2f[p] : Point2f[]
     end
     scatter!(ax_img, marker_pts; color=ui_accent, markersize=12, marker=:cross)
 
-    Colorbar(map_grid[1, 2], hm; label=L"\text{value}", width=18)
+    Colorbar(map_grid[1, 2], hm; label=data_unit_tex, width=18)
 
     # Spectre
     # Affiché dans le même espace que la carte (lin/log10/ln) → cohérence
@@ -964,9 +1289,9 @@ function carta_healpix_cube(
         xlabel = is_channel_axis ?
             L"\text{channel}" :
             latexstring("v\\;[\\mathrm{", latex_safe(vunit_eff), "}]"),
-        ylabel = lift(m_ -> m_ === :lin   ? L"T_b" :
-                            m_ === :log10 ? L"\log_{10}\,T_b" :
-                                            L"\ln\,T_b", scale_mode),
+        ylabel = lift(m_ -> m_ === :lin   ? data_unit_tex :
+                            m_ === :log10 ? latexstring("\\log_{10}\\,\\text{", latex_safe(data_unit), "}") :
+                                            latexstring("\\ln\\,\\text{", latex_safe(data_unit), "}"), scale_mode),
         xgridvisible = false, ygridvisible = false)
     lines!(ax_spec, spec_x, spec_y_disp; color=:black, linewidth=1.5)
     # ligne verticale à v(chan_idx)
@@ -992,8 +1317,21 @@ function carta_healpix_cube(
         xlims!(ax_spec, Float32(spec_x[1]), Float32(spec_x[end]))
     end
 
+    ax_hist = Axis(
+        main_grid[3, 1];
+        title = L"\text{Visible channel histogram}",
+        xlabel = data_unit_tex,
+        ylabel = L"\text{count}",
+        height = 120,
+        xtickformat = _latex_tick_formatter,
+        ytickformat = _latex_tick_formatter,
+    )
+    lines!(ax_hist, hist_x_obs, hist_y_obs; color=ui_accent, linewidth=1.5)
+    vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe);
+            color=(:black, 0.45), linewidth=1.0, linestyle=:dash)
+
     # Contrôles
-    ctrl = main_grid[3, 1] = GridLayout(; alignmode=Outside())
+    ctrl = main_grid[4, 1] = GridLayout(; alignmode=Outside())
     Label(ctrl[1,1], text=L"\text{Channel}", halign=:left, tellwidth=false, fontsize=15)
     chan_slider = Slider(ctrl[1,2]; range=1:nv, startvalue=chan_idx[],
                          width=320, height=14)
@@ -1013,11 +1351,25 @@ function carta_healpix_cube(
     clim_min_box = Textbox(ctrl[1,9];  placeholder="min", width=100, height=30)
     clim_max_box = Textbox(ctrl[1,10]; placeholder="max", width=100, height=30)
     apply_btn    = Button(ctrl[1,11]; label="Apply",      width=80,  height=30)
-    graticule_chk = Checkbox(ctrl[1,12])
-    Label(ctrl[1,13], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
+    auto_btn     = Button(ctrl[1,12]; label="Auto",       width=76,  height=30)
+    p1_btn       = Button(ctrl[1,13]; label="p1-p99",     width=88,  height=30)
+    p5_btn       = Button(ctrl[1,14]; label="p5-p95",     width=88,  height=30)
+    graticule_chk = Checkbox(ctrl[1,15])
+    Label(ctrl[1,16], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
     graticule_chk.checked[] = show_graticule[]
-    reset_btn    = Button(ctrl[1,14]; label="Reset zoom", width=120, height=30)
-    save_btn     = Button(ctrl[1,15]; label="Save PNG",   width=110, height=30)
+    reset_btn    = Button(ctrl[1,17]; label="Reset zoom", width=120, height=30)
+    save_btn     = Button(ctrl[1,18]; label="Save PNG",   width=110, height=30)
+
+    Label(ctrl[2,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
+    region_mode_menu = Menu(ctrl[2,2]; options=["point", "box", "circle"], prompt="point", width=108)
+    region_clear_btn = Button(ctrl[2,3]; label="Clear region", width=126, height=30)
+    region_count_label = Label(ctrl[2,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[2,5], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
+    contour_chk = Checkbox(ctrl[2,6])
+    Label(ctrl[2,7], text="Show", halign=:left, tellwidth=false, fontsize=15)
+    contour_levels_box = Textbox(ctrl[2,8]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
+    contour_apply_btn = Button(ctrl[2,9]; label="Apply", width=80, height=30)
+    contour_chk.checked[] = show_contours[]
 
     if use_manual[]
         a, b = clims_manual[]
@@ -1026,9 +1378,44 @@ function carta_healpix_cube(
         clim_max_box.displayed_string[] = sb; clim_max_box.stored_string[] = sb
     end
 
+    set_box_text!(tb, s::AbstractString) = begin
+        str = String(s)
+        tb.displayed_string[] = str
+        tb.stored_string[] = str
+        nothing
+    end
+    function clear_region!()
+        region_ipix[] = Int[]
+        region_start[] = Point2f(NaN32, NaN32)
+        region_end[] = Point2f(NaN32, NaN32)
+        region_drag_active[] = false
+        region_count_label.text[] = "0 pix"
+        nothing
+    end
+    function apply_region!(p0::Point2f, p1::Point2f)
+        ips = projected_region_ipix(ipix_grid, p0[1], p0[2], p1[1], p1[2], region_shape[])
+        region_count_label.text[] = "$(length(ips)) pix"
+        update_region_spectrum!(ips)
+        _refresh_spec_ylim!()
+        nothing
+    end
+    function apply_percentile_clims!(lo::Real, hi::Real)
+        clims = percentile_clims(img_disp[], lo, hi)
+        clims_manual[] = clims
+        use_manual[] = true
+        set_box_text!(clim_min_box, string(first(clims)))
+        set_box_text!(clim_max_box, string(last(clims)))
+        _refresh_spec_ylim!()
+        nothing
+    end
+
     # ---------- Reactivity ----------
     on(chan_slider.value) do v
         chan_idx[] = Int(round(v))
+        if !isempty(region_ipix[])
+            update_region_spectrum!(region_ipix[])
+            _refresh_spec_ylim!()
+        end
     end
     on(scale_menu.selection) do sel
         sel === nothing && return
@@ -1067,6 +1454,48 @@ function carta_healpix_cube(
         end
         _refresh_spec_ylim!()                # propage au spectre
     end
+    on(auto_btn.clicks) do _
+        use_manual[] = false
+        set_box_text!(clim_min_box, "")
+        set_box_text!(clim_max_box, "")
+        _refresh_spec_ylim!()
+    end
+    on(p1_btn.clicks) do _; apply_percentile_clims!(1, 99); end
+    on(p5_btn.clicks) do _; apply_percentile_clims!(5, 95); end
+    on(region_mode_menu.selection) do sel
+        sel === nothing && return
+        mode = Symbol(String(sel))
+        mode in (:point, :box, :circle) || return
+        selection_mode[] = mode
+        region_shape[] = mode === :circle ? :circle : :box
+        if mode === :point
+            clear_region!()
+            sel_ipix[] > 0 && update_spectrum!(sel_ipix[])
+            _refresh_spec_ylim!()
+        end
+    end
+    on(region_clear_btn.clicks) do _
+        clear_region!()
+        sel_ipix[] > 0 && update_spectrum!(sel_ipix[])
+        _refresh_spec_ylim!()
+    end
+    on(contour_chk.checked) do v
+        show_contours[] = v
+    end
+    on(contour_apply_btn.clicks) do _
+        ok, use_man, levels, colors, _msg = parse_contour_specs(
+            get_box_str(contour_levels_box);
+            fallback_levels=contour_manual_levels[],
+            fallback_colors=contour_manual_colors[],
+        )
+        ok || return
+        contour_use_manual[] = use_man
+        contour_manual_levels[] = levels
+        contour_manual_colors[] = colors
+        set_box_text!(contour_levels_box, use_man ? format_contour_specs(levels, colors) : "")
+        show_contours[] = true
+        contour_chk.checked[] = true
+    end
     on(scale_mode)        do _; _refresh_spec_ylim!(); end
     on(spec_y_disp)       do _; _refresh_spec_ylim!(); end
     on(use_manual)        do _; _refresh_spec_ylim!(); end
@@ -1091,6 +1520,24 @@ function carta_healpix_cube(
             zoom_bounds = (Float64(xmin), Float64(xmax), Float64(ymin), Float64(ymax))
             set_mollweide_view!(ax_img, zoom_bounds...)
             refresh_graticule_labels!(graticule, ax_img; bounds=zoom_bounds)
+        elseif ev.button == Mouse.left && ev.action == Mouse.press && selection_mode[] != :point
+            p = mouseposition(ax_img); any(isnan, p) && return
+            mollweide_xy_to_lonlat(p[1], p[2]) === nothing && return
+            region_start[] = Point2f(p[1], p[2])
+            region_end[] = Point2f(p[1], p[2])
+            region_drag_active[] = true
+            region_ipix[] = Int[]
+            region_count_label.text[] = "0 pix"
+        elseif ev.button == Mouse.left && ev.action == Mouse.release && region_drag_active[]
+            p = mouseposition(ax_img)
+            !any(isnan, p) && (region_end[] = Point2f(p[1], p[2]))
+            p0 = region_start[]; p1 = region_end[]
+            region_drag_active[] = false
+            if isfinite(p0[1]) && isfinite(p1[1])
+                apply_region!(p0, p1)
+            else
+                clear_region!()
+            end
         elseif ev.button == Mouse.left && ev.action == Mouse.press
             p = mouseposition(ax_img); any(isnan, p) && return
             ll = mollweide_xy_to_lonlat(p[1], p[2]); ll === nothing && return
@@ -1098,12 +1545,15 @@ function carta_healpix_cube(
             θhp = deg2rad(90 - b_deg); φhp = deg2rad(mod(l_deg, 360))
             ip = Healpix.ang2pixRing(res, θhp, φhp)
             sel_xy[] = Point2f(p[1], p[2])
+            clear_region!()
             update_spectrum!(ip)
         end
     end
     on(events(ax_img).mouseposition) do p
         if zoom_drag_active[] && !any(isnan, p)
             zoom_drag_end[] = Point2f(p[1], p[2])
+        elseif region_drag_active[] && !any(isnan, p)
+            region_end[] = Point2f(p[1], p[2])
         end
     end
 

@@ -12,9 +12,12 @@ Main features:
 
 - navigate cube axes and slice indices;
 - select a pixel or voxel with the mouse;
-- inspect the spectrum at the selected position;
+- inspect the spectrum at the selected position or the mean spectrum in a box/circle region;
 - switch between `lin`, `log10`, and `ln` scales;
 - invert the colormap;
+- overlay automatic or manual contours;
+- display simple FITS WCS coordinates when `CTYPE/CRVAL/CRPIX/CDELT` headers are present;
+- tune contrast from a visible-slice histogram with percentile presets;
 - apply optional Gaussian smoothing to 3D cubes;
 - zoom interactively with right-click drag;
 - export images, spectra, and GIFs;
@@ -253,13 +256,15 @@ julia --project=. -e 'using Pkg; Pkg.status()'
 - `Slice axis`: choose the active slicing axis
 - `Index`: change the current slice index
 - left click: select a voxel
+- `Region spectrum`: choose `point`, `box`, or `circle`; in box/circle mode, left-drag on the image to average the spectrum over that region
 - arrow keys: move the cursor in the current slice
 - right-click drag: zoom into a region
 - `Reset zoom`: restore the full view
 - `Image scale` and `Spectrum scale`: choose `lin`, `log10`, or `ln`
 - `Invert colormap`: reverse the colormap
 - `Gaussian filter` and `Gaussian sigma`: smooth the image
-- `Colorbar limits`: apply manual color limits
+- `Colorbar limits`: apply manual color limits, automatic limits, or percentile contrast presets
+- `Contours`: overlay automatic contours or provide manual contour levels; use `1:red, 2:#00ffaa, 3:blue` for per-level colors
 - `Save image`: export the current slice
 - `Save spectrum`: export the current spectrum
 - `Export GIF`: animate slices
@@ -268,10 +273,12 @@ julia --project=. -e 'using Pkg; Pkg.status()'
 HEALPix map:
 
 - right-click drag: zoom in the Mollweide projection
+- `Region`: choose `point`, `box`, or `circle`; in box/circle mode, left-drag on the map to compute a mean value over HEALPix pixels in that region
 - `Reset zoom`: restore the global view
 - `Scale`: choose `lin`, `log10`, or `ln`
 - `Invert`: reverse the colormap
-- `Colorbar` then `Apply`: apply manual color limits
+- `Colorbar` then `Apply`: apply manual color limits; `Auto`, `p1-p99`, and `p5-p95` adjust contrast from the current projected map values
+- `Contours`: overlay automatic contours or provide manual contour levels, optionally with colors like `1:red, 2:#00ffaa`
 - `Graticule`: show or hide the coordinate grid
 - `Save PNG`: export the figure
 
@@ -279,8 +286,10 @@ HEALPix-PPV cube:
 
 - `Channel`: change the spectral channel
 - left click: select a HEALPix pixel and update the spectrum
+- `Region`: choose `point`, `box`, or `circle`; in box/circle mode, left-drag on the map to show the mean spectrum of the selected HEALPix pixels
 - `Scale`, `Invert`, `Colorbar`, `Graticule`, `Reset zoom`, `Save PNG`:
   same behavior as for a HEALPix map
+- `Contours`: overlay automatic contours or provide manual contour levels, optionally with colors like `1:red, 2:#00ffaa`
 
 ## Exports
 
@@ -345,4 +354,3 @@ If GIF export fails, run the viewer from an active graphical session:
 `-- test/
     `-- runtests.jl
 ```
-
