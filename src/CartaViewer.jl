@@ -19,7 +19,8 @@ include("helpers/Helpers.jl")
 # ---- HEALPix viewer ----
 import Statistics: quantile
 include("CartaHealpix.jl")
-export carta_healpix, is_healpix_fits, read_healpix_map, mollweide_grid
+export carta_healpix, carta_healpix_cube, is_healpix_fits,
+       read_healpix_map, mollweide_grid, valid_healpix_npix
 
 spawn_safely(f::Function) = @async try f() catch e
     @error "Background task failed" exception=(e, catch_backtrace())
@@ -69,11 +70,15 @@ function carta(
     activate_gl::Bool = true,
     display_fig::Bool = true,
     settings_path::Union{Nothing,AbstractString} = nothing,
-    # HEALPix-specific options (ignorés pour les cubes)
+    # HEALPix-specific options (ignorés pour les cubes 3D)
     column::Int = 1,
     nx::Int = 1400,
     ny::Int = 700,
     scale::Symbol = :lin,
+    # HEALPix PPV cube (npix×nv) — axe vitesse pour le spectre
+    v0::Real = 0.0,
+    dv::Real = 1.0,
+    vunit::AbstractString = "km/s",
     )
 
     # ---------- Load ----------
@@ -81,7 +86,36 @@ function carta(
         throw(ArgumentError("FITS file not found: $(abspath(filepath))"))
     end
 
-    # ---- Dispatch HEALPix vs cube 3D ----
+    # On lit l'image primaire UNE fois : sert à la fois pour détecter un
+    # cube HEALPix-PPV 2D et pour les cubes 3D classiques. La détection
+    # HEALPix-image-1D (BinTable) reste basée sur les headers.
+    cube = try
+        FITS(filepath) do f
+            read(f[1])
+        end
+    catch e
+        nothing  # primary HDU peut être vide pour HEALPix BinTable → on tolère
+    end
+
+    # ---- Dispatch HEALPix PPV cube (2D, une dim = 12·nside²) ----
+    # Important : tester AVANT `is_healpix_fits` car nos cubes embarquent
+    # `PIXTYPE=HEALPIX` dans le header primaire pour transporter le WCS,
+    # ce qui ferait sinon basculer sur le viewer carte 1D.
+    if cube !== nothing && ndims(cube) == 2
+        s = size(cube)
+        if valid_healpix_npix(s[1]) > 0 || valid_healpix_npix(s[2]) > 0
+            @info "Detected HEALPix PPV cube → using carta_healpix_cube"
+            return carta_healpix_cube(filepath;
+                cmap=(cmap === :viridis ? :inferno : cmap),
+                vmin=vmin, vmax=vmax, invert=invert, scale=scale,
+                v0=v0, dv=dv, vunit=vunit,
+                nx=nx, ny=ny,
+                figsize=figsize, save_dir=save_dir,
+                activate_gl=activate_gl, display_fig=display_fig)
+        end
+    end
+
+    # ---- Dispatch carte HEALPix 1D (BinTable) ----
     if is_healpix_fits(filepath)
         @info "Detected HEALPix map → using carta_healpix"
         return carta_healpix(filepath;
@@ -92,12 +126,8 @@ function carta(
             activate_gl=activate_gl, display_fig=display_fig)
     end
 
-    cube = try
-        FITS(filepath) do f
-            read(f[1])
-        end
-    catch e
-        throw(ArgumentError("Failed to read FITS file $(abspath(filepath)): $(sprint(showerror, e))"))
+    if cube === nothing
+        throw(ArgumentError("Failed to read primary HDU of $(abspath(filepath))."))
     end
 
     if ndims(cube) != 3

@@ -62,6 +62,18 @@ end
     @test eltype(s1) == Float32 && eltype(s2) == Float32 && eltype(s3) == Float32
 end
 
+@testset "healpix: mollweide graticule geometry" begin
+    for lon in (-120, -30, 0, 45, 150), lat in (-60, -15, 0, 35, 70)
+        p = CartaViewer.mollweide_lonlat_to_xy(lon, lat)
+        @test p !== nothing
+        ll = CartaViewer.mollweide_xy_to_lonlat(p[1], p[2])
+        @test ll !== nothing
+        lon2, lat2 = ll
+        @test isapprox(lon2, lon; atol=1e-4)
+        @test isapprox(lat2, lat; atol=1e-4)
+    end
+end
+
 @testset "helpers: latex" begin
     s = CartaViewer.make_info_tex(1, 2, 3, 4, 5, 6f0)
     t1 = CartaViewer.make_slice_title("fname", 3, 10)
