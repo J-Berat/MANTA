@@ -42,7 +42,8 @@ RUN groupadd --gid "${GID}" carta \
 ENV JULIA_DEPOT_PATH=/opt/julia-depot \
     JULIA_PROJECT=/app \
     JULIA_PKG_PRECOMPILE_AUTO=0 \
-    LIBGL_ALWAYS_SOFTWARE=1
+    LIBGL_ALWAYS_SOFTWARE=1 \
+    PATH="/usr/local/julia/bin:${PATH}"
 
 WORKDIR /app
 USER carta
@@ -50,16 +51,23 @@ USER carta
 COPY --chown=carta:carta Project.toml ./
 RUN julia --project=. -e 'import Pkg; Pkg.instantiate()'
 
-COPY --chown=carta:carta . .
+COPY --chown=carta:carta src ./src
+COPY --chown=carta:carta demo ./demo
+COPY --chown=carta:carta scripts ./scripts
+COPY --chown=carta:carta test ./test
+COPY --chown=carta:carta carta ./
+RUN chmod +x /app/carta
+
+RUN xvfb-run -a julia --project=. -e 'import Pkg; Pkg.precompile()'
+
+COPY --chown=carta:carta README.md DOCKER.md ./
 
 USER root
-RUN install -m 0755 docker-entrypoint.sh /usr/local/bin/carta-docker-entrypoint \
-    && chmod +x /app/carta \
+COPY docker-entrypoint.sh /usr/local/bin/carta-docker-entrypoint
+RUN chmod 0755 /usr/local/bin/carta-docker-entrypoint \
     && chown -R carta:carta /app /opt/julia-depot
 
 USER carta
-RUN julia --project=. -e 'import Pkg; Pkg.precompile()'
-
 ENV JULIA_PKG_PRECOMPILE_AUTO=1
 
 ENTRYPOINT ["carta-docker-entrypoint"]

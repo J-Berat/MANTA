@@ -8,7 +8,11 @@ if [[ $# -eq 0 ]]; then
 fi
 
 case "$1" in
-  bash|sh|julia|xvfb-run)
+  xvfb-run)
+    "$@"
+    exit $?
+    ;;
+  bash|sh|julia)
     exec "$@"
     ;;
   *)
