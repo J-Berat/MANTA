@@ -13,6 +13,7 @@ demo/output/
 *.gif
 
 # Editors
+.claude/
 .vscode/
 .idea/
 *.swp
