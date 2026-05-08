@@ -490,8 +490,6 @@ function manta_healpix(
         fig[1, 1];
         title = make_main_title(title),
         aspect = DataAspect(),
-        xgridvisible = false,
-        ygridvisible = false,
         xticksvisible = false,
         yticksvisible = false,
         xticklabelsvisible = false,
@@ -539,8 +537,6 @@ function manta_healpix_panels(
             fig[1, i];
             title = make_main_title(title_at(i)),
             aspect = DataAspect(),
-            xgridvisible = false,
-            ygridvisible = false,
             xticksvisible = false,
             yticksvisible = false,
             xticklabelsvisible = false,
@@ -793,7 +789,7 @@ function manta_healpix(
     end
     show_contours = Observable(false)
 
-    hist_pair_obs = lift(img_disp, clims_auto) do im, lim
+    hist_pair_obs = lift(img_disp, clims_safe) do im, lim
         histogram_counts(im; bins = 64, limits = lim)
     end
     hist_x_obs = lift(p -> p[1], hist_pair_obs)
@@ -822,7 +818,6 @@ function manta_healpix(
         main_grid[1, 1];
         title  = make_main_title(fname),
         aspect = DataAspect(),
-        xgridvisible = false, ygridvisible = false,
         xticksvisible = false, yticksvisible = false,
         xticklabelsvisible = false, yticklabelsvisible = false,
         bottomspinevisible = false, topspinevisible = false,
@@ -1366,7 +1361,7 @@ function manta_healpix_cube(
     end
     show_contours = Observable(false)
 
-    hist_pair_obs = lift(img_disp, clims_auto) do im, lim
+    hist_pair_obs = lift(img_disp, clims_safe) do im, lim
         histogram_counts(im; bins = 64, limits = lim)
     end
     hist_x_obs = lift(p -> p[1], hist_pair_obs)
@@ -1442,7 +1437,6 @@ function manta_healpix_cube(
     ax_img = Axis(map_grid[1, 1];
         title = title_obs,
         aspect = DataAspect(),
-        xgridvisible = false, ygridvisible = false,
         xticksvisible = false, yticksvisible = false,
         xticklabelsvisible = false, yticklabelsvisible = false,
         bottomspinevisible = false, topspinevisible = false,
@@ -1510,8 +1504,7 @@ function manta_healpix_cube(
             latexstring("v\\;[\\mathrm{", latex_safe(vunit_eff), "}]"),
         ylabel = lift(m_ -> m_ === :lin   ? data_unit_tex :
                             m_ === :log10 ? latexstring("\\log_{10}\\,\\text{", latex_safe(data_unit), "}") :
-                                            latexstring("\\ln\\,\\text{", latex_safe(data_unit), "}"), scale_mode),
-        xgridvisible = false, ygridvisible = false)
+                                            latexstring("\\ln\\,\\text{", latex_safe(data_unit), "}"), scale_mode))
     lines!(ax_spec, spec_x, spec_y_disp; color=:black, linewidth=1.5)
     # ligne verticale à v(chan_idx)
     chan_v = lift(chan_idx) do j; Float32(v0_eff + (j-1)*dv_eff); end

@@ -251,6 +251,7 @@ function manta(
     compare_mode = Observable(:B)
     view_product = Observable(:slice)
     moment_order = Observable(0)
+    layout_mode = Observable(:base)
     anim_playing = Observable(false)
 
     slice_raw = lift(axis, idx) do a, id
@@ -459,12 +460,6 @@ function manta(
         contour_color_values(use_man ? colors : String[], length(levels), contour_default_color)
     end
 
-    hist_pair_obs = lift(slice_disp, clims_auto) do s, lim
-        histogram_counts(s; bins = 64, limits = lim)
-    end
-    hist_x_obs = lift(p -> p[1], hist_pair_obs)
-    hist_y_obs = lift(p -> p[2], hist_pair_obs)
-
     clims_manual = Observable((0f0, 1f0))
     use_manual   = Observable(false)
 
@@ -489,6 +484,25 @@ function manta(
             (cmin, cmax)
         end
     end
+
+    hist_pair_obs = lift(slice_disp, clims_safe) do s, lim
+        histogram_counts(s; bins = 64, limits = lim)
+    end
+    hist_x_obs = lift(p -> p[1], hist_pair_obs)
+    hist_y_obs = lift(p -> p[2], hist_pair_obs)
+
+    compare_hist_pair_obs = lift(compare_slice_proc, img_scale_mode, compare_visible, clims_safe) do s, mode, visible, lim
+        visible || return (Float32[], Float32[])
+        A = apply_scale(s, mode)
+        out = similar(A, Float32)
+        @inbounds for i in eachindex(A)
+            x = A[i]
+            out[i] = isfinite(x) ? Float32(x) : 0f0
+        end
+        histogram_counts(out; bins = 64, limits = lim)
+    end
+    compare_hist_x_obs = lift(p -> p[1], compare_hist_pair_obs)
+    compare_hist_y_obs = lift(p -> p[2], compare_hist_pair_obs)
 
     compare_clims_safe = lift(compare_slice_disp, compare_mode, clims_safe) do s, mode, lim
         if mode in (:A, :B)
@@ -637,7 +651,7 @@ function manta(
     # Info + spectrum
     spec_grid = main_grid[1, 2] = GridLayout()
     info_panel = spec_grid[1, 1] = GridLayout(; alignmode = Outside())
-    Box(
+    info_box = Box(
         info_panel[1, 1];
         color = ui_surface,
         strokecolor = ui_border,
@@ -685,7 +699,40 @@ function manta(
         ytickformat = latex_tick_formatter,
     )
     lines!(ax_hist, hist_x_obs, hist_y_obs; color = ui_accent, linewidth = 1.6)
+    lines!(ax_hist, compare_hist_x_obs, compare_hist_y_obs; color = RGBf(0.92, 0.42, 0.18), linewidth = 1.6, visible = compare_visible)
     vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe); color = (ui_text_muted, 0.65), linewidth = 1.1, linestyle = :dash)
+
+    ps_layout = spec_grid[4, 1] = GridLayout(; alignmode = Outside(8))
+    ps_header = ps_layout[1, 1] = GridLayout()
+    colgap!(ps_header, 8)
+    rowgap!(ps_header, 8)
+    Label(ps_header[1, 1]; text = "Mode", halign = :right, fontsize = 13, color = ui_text_muted)
+    ps_mode_menu = Menu(ps_header[1, 2]; options = ["2D", "1D"], prompt = "2D", width = 76)
+    Label(ps_header[1, 3]; text = "Source", halign = :right, fontsize = 13, color = ui_text_muted)
+    ps_src_menu = Menu(ps_header[1, 4]; options = ["zoom", "full"], prompt = "zoom", width = 82)
+    Label(ps_header[1, 5]; text = "Window", halign = :right, fontsize = 13, color = ui_text_muted)
+    ps_win_menu = Menu(ps_header[1, 6]; options = ["Hann", "Hamming", "None"], prompt = "Hann", width = 94)
+    Label(ps_header[1, 7]; text = "Units", halign = :right, fontsize = 13, color = ui_text_muted)
+    ps_unit_menu = Menu(ps_header[1, 8]; options = ["pixel", "physical"], prompt = "pixel", width = 94)
+    ps_refresh_btn = Button(ps_header[1, 9]; label = "Refresh", width = 82, height = 30)
+
+    ps_pad_chk = Checkbox(ps_header[2, 1])
+    Label(ps_header[2, 2]; text = "Pad pow2", halign = :left, fontsize = 13, color = ui_text)
+    ps_nanapo_chk = Checkbox(ps_header[2, 3])
+    Label(ps_header[2, 4]; text = "NaN apod.", halign = :left, fontsize = 13, color = ui_text)
+    ps_fit_chk = Checkbox(ps_header[2, 5])
+    Label(ps_header[2, 6]; text = "Fit slope", halign = :left, fontsize = 13, color = ui_text)
+    ps_kmin_box = Textbox(ps_header[2, 7]; placeholder = "k_min", width = 78, height = 28)
+    ps_kmax_box = Textbox(ps_header[2, 8]; placeholder = "k_max", width = 78, height = 28)
+    ps_popout_btn = Button(ps_header[2, 9]; label = "Window", width = 82, height = 30)
+
+    ps_base_btn = Button(ps_header[3, 1:2]; label = "Base layout", width = 124, height = 30)
+    ps_layout_status = Observable(" ")
+    Label(ps_header[3, 3:9]; text = ps_layout_status, halign = :left, fontsize = 12, color = ui_text_muted, tellwidth = false)
+
+    ps_plot_grid = ps_layout[2, 1] = GridLayout()
+    rowsize!(ps_layout, 1, Fixed(112))
+    rowsize!(spec_grid, 4, Fixed(0))
 
     # Controls
     controls_grid = main_grid[2, 1:2] = GridLayout(; alignmode = Outside())
@@ -721,7 +768,8 @@ function manta(
     control_label!(view_card, (3, 1), "Spectrum")
     spec_scale_menu = Menu(view_card[3, 2]; options = ["lin", "log10", "ln"], prompt = "lin", width = 96)
     reset_zoom_btn = Button(view_card[2, 3:4]; label = "Reset zoom", width = 132, height = 32)
-    ps_btn = Button(view_card[4, 1:4]; label = "Power spectrum…", width = 240, height = 32)
+    ps_btn = Button(view_card[4, 1:4]; label = "Power spectrum layout", width = 240, height = 32)
+    base_layout_btn = Button(view_card[5, 1:4]; label = "Base layout", width = 240, height = 32)
     foreach(c -> colsize!(view_card, c, Auto()), 1:4)
 
     slice_card = control_card!(controls_grid, 1, 2, "Slice"; rows = 4, cols = 5)
@@ -814,6 +862,10 @@ function manta(
     style_checkbox!(grid_chk)
     style_menu!(img_scale_menu)
     style_menu!(spec_scale_menu)
+    style_menu!(ps_mode_menu)
+    style_menu!(ps_src_menu)
+    style_menu!(ps_win_menu)
+    style_menu!(ps_unit_menu)
     style_menu!(fmt_menu)
     style_menu!(compare_mode_menu)
     style_menu!(axis_menu)
@@ -827,8 +879,17 @@ function manta(
     style_textbox!(fps_box)
     style_textbox!(clim_min_box)
     style_textbox!(clim_max_box)
+    style_textbox!(ps_kmin_box)
+    style_textbox!(ps_kmax_box)
     style_button!(reset_zoom_btn)
     style_button!(ps_btn)
+    style_button!(base_layout_btn)
+    style_button!(ps_refresh_btn)
+    style_button!(ps_popout_btn)
+    style_button!(ps_base_btn)
+    style_checkbox!(ps_pad_chk)
+    style_checkbox!(ps_nanapo_chk)
+    style_checkbox!(ps_fit_chk)
     style_button!(btn_save_img)
     style_button!(btn_save_spec)
     style_button!(btn_save_state)
@@ -1470,6 +1531,276 @@ function manta(
         return "$(b)_axis$(axis[])_idx$(idx[])_i$(i_idx[])_j$(j_idx[])_k$(k_idx[])_img$(String(img_scale_mode[]))_spec$(String(spec_scale_mode[])).$(ext)"
     end
 
+    # ---------- Embedded power-spectrum layout ----------
+    ps_layout_mode = Observable(:two_d)    # :two_d | :one_d
+    ps_layout_src = Observable(:zoom)      # :zoom | :full
+    ps_layout_window = Observable(:hann)   # :hann | :hamming | :none
+    ps_layout_pad = Observable(false)
+    ps_layout_nanapo = Observable(false)
+    ps_layout_units = Observable(:pixel)   # :pixel | :physical
+    ps_layout_fit = Observable(false)
+    ps_layout_blocks = Any[]
+
+    ps_u_dim_now() = slice_axis_dims(axis[])[1]
+    ps_v_dim_now() = slice_axis_dims(axis[])[2]
+    ps_physical_available() = has_wcs(wcs, ps_u_dim_now()) && has_wcs(wcs, ps_v_dim_now())
+    ps_pixel_scales() = begin
+        if ps_physical_available()
+            dy = abs(wcs[ps_u_dim_now()].cdelt)
+            dx = abs(wcs[ps_v_dim_now()].cdelt)
+            (dx, dy)
+        else
+            (1.0, 1.0)
+        end
+    end
+    ps_physical_unit_label() = begin
+        if ps_physical_available()
+            u = wcs[ps_v_dim_now()].cunit
+            isempty(u) ? "1" : u
+        else
+            ""
+        end
+    end
+
+    function ps_layout_clear!()
+        for b in ps_layout_blocks
+            try
+                Makie.delete!(b)
+            catch
+            end
+        end
+        empty!(ps_layout_blocks)
+        nothing
+    end
+
+    function ps_layout_subimage()
+        M = slice_proc[]
+        if ps_layout_src[] === :full
+            return M
+        end
+        fl = ax_img.finallimits[]
+        x0 = Float64(fl.origin[1])
+        y0 = Float64(fl.origin[2])
+        x1 = x0 + Float64(fl.widths[1])
+        y1 = y0 + Float64(fl.widths[2])
+        i_lo = clamp(Int(floor(min(x0, x1))), 1, size(M, 1))
+        i_hi = clamp(Int(ceil(max(x0, x1))),  1, size(M, 1))
+        j_lo = clamp(Int(floor(min(y0, y1))), 1, size(M, 2))
+        j_hi = clamp(Int(ceil(max(y0, y1))),  1, size(M, 2))
+        (i_hi <= i_lo || j_hi <= j_lo) && return M
+        return M[i_lo:i_hi, j_lo:j_hi]
+    end
+
+    function ps_layout_status_text(meta)
+        io = IOBuffer()
+        print(io, "size $(meta.ny_in)×$(meta.nx_in)")
+        if meta.padded
+            print(io, " (pad→$(meta.ny_eff)×$(meta.nx_eff))")
+        end
+        print(io, " • $(meta.src) • ")
+        print(io, meta.window === :none ? "none" : titlecase(String(meta.window)))
+        meta.apodized && print(io, " • NaN apod")
+        meta.f_sky < 1.0 && print(io, " • f_sky=$(round(meta.f_sky; digits = 3))")
+        print(io, " • k=", meta.k_phys ? "1/$(ps_physical_unit_label())" : "cycles/pixel")
+        return String(take!(io))
+    end
+
+    function render_power_spectrum_layout!()
+        ps_layout_clear!()
+        sub = ps_layout_subimage()
+        ny0, nx0 = size(sub)
+        if ny0 < 4 || nx0 < 4
+            lab = Label(ps_plot_grid[1, 1]; text = "Region too small for FFT (need ≥ 4×4).", fontsize = 14, color = ui_text)
+            push!(ps_layout_blocks, lab)
+            ps_layout_status[] = " "
+            return
+        end
+
+        res = power_spectrum_2d(sub;
+                                window = ps_layout_window[],
+                                pad_pow2 = ps_layout_pad[],
+                                apodize_nan = ps_layout_nanapo[])
+        P2d = res.P2d
+        ny, nx = res.ny_eff, res.nx_eff
+        src_label = ps_layout_src[] === :full ? "full" : "zoom"
+        use_phys = ps_layout_units[] === :physical && ps_physical_available()
+        dx, dy = ps_pixel_scales()
+        k_unit_lbl = use_phys ? "1/$(ps_physical_unit_label())" : "cycles/pixel"
+        meta = (; ny_in = res.ny_in, nx_in = res.nx_in,
+                  ny_eff = ny, nx_eff = nx,
+                  padded = res.padded, window = res.window,
+                  apodized = res.apodized, f_sky = res.f_sky,
+                  k_phys = use_phys, src = src_label)
+
+        if ps_layout_mode[] === :two_d
+            pmax = maximum(P2d)
+            floor_val = max(eps(Float64), pmax * 1e-12)
+            vis = log10.(max.(P2d, floor_val))
+            ax = Axis(
+                ps_plot_grid[1, 1];
+                title = latexstring("\\text{2D power spectrum (log10) — ", latex_safe(src_label), "}"),
+                xlabel = use_phys ?
+                    latexstring("k_x\\;(", latex_safe(k_unit_lbl), ")") :
+                    L"k_x\;\text{(cycles/pixel)}",
+                ylabel = use_phys ?
+                    latexstring("k_y\\;(", latex_safe(k_unit_lbl), ")") :
+                    L"k_y\;\text{(cycles/pixel)}",
+                aspect = DataAspect(),
+                xtickformat = latex_tick_formatter,
+                ytickformat = latex_tick_formatter,
+            )
+            kx = collect(Float32, (-nx / 2):(nx / 2 - 1)) ./ Float32(nx)
+            ky = collect(Float32, (-ny / 2):(ny / 2 - 1)) ./ Float32(ny)
+            if use_phys
+                kx ./= Float32(dx)
+                ky ./= Float32(dy)
+            end
+            hm_ps = heatmap!(ax, kx, ky, vis; colormap = cm_obs[])
+            cb = Colorbar(ps_plot_grid[1, 2], hm_ps; label = L"\log_{10}|F|^2", width = 18)
+            push!(ps_layout_blocks, ax)
+            push!(ps_layout_blocks, cb)
+        else
+            radii, prof = power_spectrum_1d_radial(P2d)
+            k_cyc = radii ./ Float32(min(ny, nx))
+            k = use_phys ? Float32.(k_cyc ./ Float32(sqrt(dx * dy))) : k_cyc
+            pmax = isempty(prof) ? 1.0f0 : maximum(prof)
+            floor_val = Float32(max(eps(Float32), pmax * 1f-12))
+            p_floored = max.(prof, floor_val)
+
+            ax = Axis(
+                ps_plot_grid[1, 1];
+                title = latexstring("\\text{1D radial power spectrum — ", latex_safe(src_label), "}"),
+                xlabel = use_phys ?
+                    latexstring("k\\;(", latex_safe(k_unit_lbl), ")") :
+                    L"k\;\text{(cycles/pixel)}",
+                ylabel = L"\langle|F|^2\rangle",
+                yscale = log10,
+                xtickformat = latex_tick_formatter,
+            )
+            isempty(k) || lines!(ax, k, p_floored; color = ui_accent, linewidth = 1.8)
+            push!(ps_layout_blocks, ax)
+
+            if ps_layout_fit[] && length(k) >= 3
+                valid_k = filter(>(0), k)
+                auto_lo = isempty(valid_k) ? 0.0 : Float64(first(valid_k))
+                auto_hi = isempty(k) ? Inf : Float64(last(k))
+                kmin_txt = get_box_str(ps_kmin_box)
+                kmax_txt = get_box_str(ps_kmax_box)
+                kmin_v = isempty(kmin_txt) ? auto_lo : something(tryparse(Float64, kmin_txt), auto_lo)
+                kmax_v = isempty(kmax_txt) ? auto_hi : something(tryparse(Float64, kmax_txt), auto_hi)
+                slope, intercept, n_used = fit_loglog_slope(k, prof; kmin = kmin_v, kmax = kmax_v)
+                if isfinite(slope) && n_used >= 2
+                    kfit = filter(ki -> ki > 0 && ki >= kmin_v && ki <= kmax_v, k)
+                    if !isempty(kfit)
+                        yfit = Float32.(10 .^ (slope .* log10.(Float64.(kfit)) .+ intercept))
+                        lines!(ax, kfit, yfit; color = :red, linestyle = :dash, linewidth = 1.5)
+                        ps_layout_status[] = ps_layout_status_text(meta) * " • slope=$(round(slope; digits = 3)) [n=$(n_used)]"
+                        return
+                    end
+                end
+            end
+        end
+        ps_layout_status[] = ps_layout_status_text(meta)
+        nothing
+    end
+
+    function apply_layout_mode!()
+        if layout_mode[] === :power_spectrum
+            rowsize!(spec_grid, 1, Fixed(0))
+            rowsize!(spec_grid, 2, Fixed(0))
+            rowsize!(spec_grid, 3, Fixed(0))
+            rowsize!(spec_grid, 4, Relative(1))
+            info_box.visible[] = false
+            lab_info.visible[] = false
+            ax_spec.scene.visible[] = false
+            ax_hist.scene.visible[] = false
+            render_power_spectrum_layout!()
+            set_status!("Power spectrum layout enabled.")
+        else
+            rowsize!(spec_grid, 1, Auto())
+            rowsize!(spec_grid, 2, Auto())
+            rowsize!(spec_grid, 3, Auto())
+            rowsize!(spec_grid, 4, Fixed(0))
+            info_box.visible[] = true
+            lab_info.visible[] = true
+            ax_spec.scene.visible[] = true
+            ax_hist.scene.visible[] = true
+            set_status!("Base layout restored.")
+        end
+        nothing
+    end
+
+    on(layout_mode) do _
+        apply_layout_mode!()
+    end
+
+    on(ps_btn.clicks) do _
+        layout_mode[] = :power_spectrum
+    end
+
+    on(base_layout_btn.clicks) do _
+        layout_mode[] = :base
+    end
+
+    on(ps_base_btn.clicks) do _
+        layout_mode[] = :base
+    end
+
+    on(ps_mode_menu.selection) do sel
+        sel === nothing && return
+        ps_layout_mode[] = sel == "1D" ? :one_d : :two_d
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
+    on(ps_src_menu.selection) do sel
+        sel === nothing && return
+        ps_layout_src[] = sel == "full" ? :full : :zoom
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
+    on(ps_win_menu.selection) do sel
+        sel === nothing && return
+        ps_layout_window[] = sel == "Hamming" ? :hamming : sel == "None" ? :none : :hann
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
+    on(ps_unit_menu.selection) do sel
+        sel === nothing && return
+        ps_layout_units[] = sel == "physical" ? :physical : :pixel
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
+    on(ps_pad_chk.checked) do v
+        ps_layout_pad[] = v
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
+    on(ps_nanapo_chk.checked) do v
+        ps_layout_nanapo[] = v
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
+    on(ps_fit_chk.checked) do v
+        ps_layout_fit[] = v
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
+    on(ps_kmin_box.stored_string) do _
+        layout_mode[] === :power_spectrum && ps_layout_fit[] && render_power_spectrum_layout!()
+    end
+
+    on(ps_kmax_box.stored_string) do _
+        layout_mode[] === :power_spectrum && ps_layout_fit[] && render_power_spectrum_layout!()
+    end
+
+    on(ps_refresh_btn.clicks) do _
+        render_power_spectrum_layout!()
+    end
+
+    on(slice_proc) do _
+        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
+    end
+
     # Unified export (let Makie/Cairo choose the backend)
     save_with_format(path::AbstractString, fig) = CairoMakie.save(String(path), fig)
 
@@ -2109,6 +2440,11 @@ function manta(
         on(kmax_box.stored_string) do _; ps_fit_on[] && ps_render!(); end
         on(refresh_btn.clicks) do _; ps_render!(); end
 
+        ps_window_alive = Ref(true)
+        on(slice_proc) do _
+            ps_window_alive[] && ps_render!()
+        end
+
         ps_save_path(ext) = joinpath(save_root, make_name(get_box_str(fname_box), "powerspec.$(ext)"))
         on(save_png_btn.clicks) do _
             try
@@ -2154,6 +2490,7 @@ function manta(
         ps_alive_ref[] = true
         on(fig_ps.scene.events.window_open) do is_open
             if !is_open
+                ps_window_alive[] = false
                 ps_alive_ref[] = false
                 ps_fig_ref[]   = nothing
                 forget!(fig_ps)
@@ -2163,7 +2500,7 @@ function manta(
         return fig_ps
     end
 
-    on(ps_btn.clicks) do _
+    on(ps_popout_btn.clicks) do _
         try
             open_power_spectrum_window!()
         catch e
@@ -2237,7 +2574,7 @@ function manta(
     clims_safe = lift(clims_obs) do (lo, hi)
         (isfinite(lo) && isfinite(hi) && lo != hi) ? (lo, hi) : (0f0, 1f0)
     end
-    hist_pair_obs = lift(img_disp, clims_auto) do im, lim
+    hist_pair_obs = lift(img_disp, clims_safe) do im, lim
         histogram_counts(im; bins = 64, limits = lim)
     end
     hist_x_obs = lift(p -> p[1], hist_pair_obs)
@@ -2439,8 +2776,6 @@ function manta_panels(
             fig[1, i];
             title = make_main_title(title_at(i)),
             aspect = DataAspect(),
-            xgridvisible = false,
-            ygridvisible = false,
         )
         if is_rgb_like(panel)
             img = as_rgb_image(panel)
