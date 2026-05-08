@@ -1,8 +1,13 @@
 #       API stable: apply_scale, clamped_extrema, percentile_clims, histogram_counts,
+#                   is_rgb_like, as_rgb_image, as_rgb_pixels, rgb_image,
+#                   nan_gaussian_filter,
 #                   automatic_contour_levels, parse_contour_levels,
 #                   parse_contour_specs, format_contour_specs, contour_color_values,
 #                   ijk_to_uv, uv_to_ijk, get_slice,
 #                   region_uv_indices, mean_region_spectrum,
+#                   dual_view_product, moments, moments_map, moment_map,
+#                   moment_vectors,
+#                   filtered_cube_by_slice,
 #                   make_info_tex, to_cmap, get_box_str, _pick_fig_size,
 #                   latex_safe, make_main_title, make_slice_title, make_spec_title,
 #                   parse_manual_clims, parse_gif_request,
@@ -14,10 +19,13 @@
 # Exports
 ############################
 export apply_scale, clamped_extrema, percentile_clims, histogram_counts
+export is_rgb_like, as_rgb_image, as_rgb_pixels, rgb_image
+export nan_gaussian_filter
 export automatic_contour_levels, parse_contour_levels
 export parse_contour_specs, format_contour_specs, contour_color_values
 export ijk_to_uv, uv_to_ijk, get_slice
 export region_uv_indices, mean_region_spectrum
+export dual_view_product, moments, moments_map, moment_map, moment_vectors, filtered_cube_by_slice
 export make_info_tex
 export to_cmap, get_box_str, _pick_fig_size
 export latex_safe, make_main_title, make_slice_title, make_spec_title
@@ -25,6 +33,7 @@ export parse_manual_clims, parse_gif_request
 export SimpleWCSAxis, read_simple_wcs, has_wcs, world_coord
 export wcs_axis_label, format_world_coord, data_unit_label
 export save_viewer_settings, load_viewer_settings
+export power_spectrum_2d, power_spectrum_1d_radial, fit_loglog_slope
 
 ############################
 # Deps
@@ -32,7 +41,191 @@ export save_viewer_settings, load_viewer_settings
 using Makie
 using LaTeXStrings
 using TOML
-using Statistics: quantile
+using Statistics: quantile, mean
+using ImageFiltering
+using FFTW: fft, fftshift
+
+############################
+# Filtering
+############################
+
+"""
+    nan_gaussian_filter(img, sigma) -> Matrix{Float32}
+
+Gaussian smoothing for projected maps with NaNs. Finite values are filtered and
+renormalized by a filtered validity mask, so invalid/outside pixels do not bleed
+into the map. Invalid output pixels stay `NaN32`.
+"""
+function nan_gaussian_filter(img::AbstractMatrix, sigma::Real)
+    σ = Float32(sigma)
+    σ <= 0 && return Float32.(img)
+    values = similar(img, Float32)
+    weights = similar(img, Float32)
+    @inbounds for i in eachindex(img)
+        v = Float32(img[i])
+        if isfinite(v)
+            values[i] = v
+            weights[i] = 1f0
+        else
+            values[i] = 0f0
+            weights[i] = 0f0
+        end
+    end
+    k = ImageFiltering.Kernel.gaussian((σ, σ))
+    smooth_values = imfilter(values, k)
+    smooth_weights = imfilter(weights, k)
+    out = similar(values, Float32)
+    @inbounds for i in eachindex(out)
+        w = smooth_weights[i]
+        out[i] = w > 1f-6 ? Float32(smooth_values[i] / w) : NaN32
+    end
+    return out
+end
+
+############################
+# RGB helpers
+############################
+
+is_rgb_like(x) = x isa AbstractArray && (
+    eltype(x) <: Colorant ||
+    (ndims(x) == 3 && (size(x, 1) in (3, 4) || size(x, 3) in (3, 4))) ||
+    (ndims(x) == 2 && (size(x, 1) in (3, 4) || size(x, 2) in (3, 4)) && valid_healpix_npix(maximum(size(x))) > 0)
+)
+
+_unit_channel(v) = begin
+    x = Float32(v)
+    isfinite(x) ? clamp(x, 0f0, 1f0) : 0f0
+end
+
+function _normalize_rgb_channel(ch, mode::Symbol)
+    out = similar(ch, Float32)
+    if mode === :none
+        @inbounds for i in eachindex(ch)
+            out[i] = _unit_channel(ch[i])
+        end
+        return out
+    elseif mode === :symmetric
+        m = 0f0
+        @inbounds for v in ch
+            fv = Float32(v)
+            isfinite(fv) && (m = max(m, abs(fv)))
+        end
+        if m == 0f0
+            fill!(out, 0.5f0)
+        else
+            @inbounds for i in eachindex(ch)
+                fv = Float32(ch[i])
+                out[i] = isfinite(fv) ? clamp(0.5f0 + 0.5f0 * fv / m, 0f0, 1f0) : 0f0
+            end
+        end
+        return out
+    elseif mode === :minmax
+        lo, hi = clamped_extrema(ch)
+        span = hi - lo
+        if span == 0f0
+            fill!(out, 0.5f0)
+        else
+            @inbounds for i in eachindex(ch)
+                fv = Float32(ch[i])
+                out[i] = isfinite(fv) ? clamp((fv - lo) / span, 0f0, 1f0) : 0f0
+            end
+        end
+        return out
+    else
+        throw(ArgumentError("RGB normalization must be :none, :minmax, or :symmetric."))
+    end
+end
+
+"""
+    rgb_image(r, g, b; normalize=:symmetric) -> Matrix{RGBf}
+
+Build a display-ready RGB image from three scalar channels of the same size.
+`normalize` can be `:symmetric`, `:minmax`, or `:none`.
+"""
+function rgb_image(r::AbstractMatrix, g::AbstractMatrix, b::AbstractMatrix; normalize::Symbol = :symmetric)
+    (size(r) == size(g) && size(r) == size(b)) || throw(ArgumentError("RGB channels must have identical sizes."))
+    R = _normalize_rgb_channel(r, normalize)
+    G = _normalize_rgb_channel(g, normalize)
+    B = _normalize_rgb_channel(b, normalize)
+    out = Matrix{RGBf}(undef, size(R))
+    @inbounds for i in eachindex(R)
+        out[i] = RGBf(R[i], G[i], B[i])
+    end
+    return out
+end
+
+"""
+    as_rgb_image(img) -> AbstractMatrix{<:Colorant}
+
+Accept either a 2D colorant matrix or a numeric 3/4-channel stack with channels
+in the first or last dimension. Numeric channels are interpreted in `[0, 1]`.
+"""
+function as_rgb_image(img::AbstractMatrix{<:Colorant})
+    return img
+end
+
+function as_rgb_image(img::AbstractArray)
+    ndims(img) == 3 || throw(ArgumentError("RGB image must be a color matrix or a 3D stack with 3/4 channels."))
+    if size(img, 1) in (3, 4)
+        rows, cols = size(img, 2), size(img, 3)
+        if size(img, 1) == 3
+            return RGBf[
+                RGBf(_unit_channel(img[1, i, j]), _unit_channel(img[2, i, j]), _unit_channel(img[3, i, j]))
+                for i in 1:rows, j in 1:cols
+            ]
+        else
+            return RGBAf[
+                RGBAf(_unit_channel(img[1, i, j]), _unit_channel(img[2, i, j]), _unit_channel(img[3, i, j]), _unit_channel(img[4, i, j]))
+                for i in 1:rows, j in 1:cols
+            ]
+        end
+    elseif size(img, 3) in (3, 4)
+        rows, cols = size(img, 1), size(img, 2)
+        if size(img, 3) == 3
+            return RGBf[
+                RGBf(_unit_channel(img[i, j, 1]), _unit_channel(img[i, j, 2]), _unit_channel(img[i, j, 3]))
+                for i in 1:rows, j in 1:cols
+            ]
+        else
+            return RGBAf[
+                RGBAf(_unit_channel(img[i, j, 1]), _unit_channel(img[i, j, 2]), _unit_channel(img[i, j, 3]), _unit_channel(img[i, j, 4]))
+                for i in 1:rows, j in 1:cols
+            ]
+        end
+    else
+        throw(ArgumentError("RGB stack must have 3 or 4 channels in the first or last dimension."))
+    end
+end
+
+"""
+    as_rgb_pixels(pixels) -> Vector{<:Colorant}
+
+Accept a HEALPix RGB vector or a numeric `npix×3`, `npix×4`, `3×npix`, or
+`4×npix` array. Numeric channels are interpreted in `[0, 1]`.
+"""
+function as_rgb_pixels(pixels::AbstractVector{<:Colorant})
+    valid_healpix_npix(length(pixels)) > 0 || throw(ArgumentError("RGB HEALPix vector length must be 12*nside^2."))
+    return pixels
+end
+
+function as_rgb_pixels(pixels::AbstractMatrix)
+    rows, cols = size(pixels)
+    if cols in (3, 4) && valid_healpix_npix(rows) > 0
+        if cols == 3
+            return RGBf[RGBf(_unit_channel(pixels[i, 1]), _unit_channel(pixels[i, 2]), _unit_channel(pixels[i, 3])) for i in 1:rows]
+        else
+            return RGBAf[RGBAf(_unit_channel(pixels[i, 1]), _unit_channel(pixels[i, 2]), _unit_channel(pixels[i, 3]), _unit_channel(pixels[i, 4])) for i in 1:rows]
+        end
+    elseif rows in (3, 4) && valid_healpix_npix(cols) > 0
+        if rows == 3
+            return RGBf[RGBf(_unit_channel(pixels[1, i]), _unit_channel(pixels[2, i]), _unit_channel(pixels[3, i])) for i in 1:cols]
+        else
+            return RGBAf[RGBAf(_unit_channel(pixels[1, i]), _unit_channel(pixels[2, i]), _unit_channel(pixels[3, i]), _unit_channel(pixels[4, i])) for i in 1:cols]
+        end
+    else
+        throw(ArgumentError("RGB HEALPix pixels must be a vector or a numeric npix×3/4 or 3/4×npix matrix."))
+    end
+end
 
 ############################
 # Scaling / Extrema
@@ -452,6 +645,213 @@ function mean_region_spectrum(data::AbstractArray{T,3}, axis::Integer, uv_indice
     return y
 end
 
+function finite_mean_std(vals)
+    acc = 0.0
+    cnt = 0
+    @inbounds for v in vals
+        x = Float64(v)
+        if isfinite(x)
+            acc += x
+            cnt += 1
+        end
+    end
+    cnt == 0 && return (NaN, NaN)
+    μ = acc / cnt
+    acc2 = 0.0
+    @inbounds for v in vals
+        x = Float64(v)
+        if isfinite(x)
+            acc2 += (x - μ)^2
+        end
+    end
+    σ = cnt <= 1 ? 0.0 : sqrt(acc2 / (cnt - 1))
+    return (μ, σ)
+end
+
+"""
+    dual_view_product(a, b, mode) -> Matrix{Float32}
+
+Compute the right-hand dual-view product from primary slice `a` and secondary
+slice `b`. `mode` accepts `:A`, `:B`, `:diff`, `:ratio`, or `:residuals`.
+"""
+function dual_view_product(a::AbstractMatrix, b::AbstractMatrix, mode::Symbol)
+    size(a) == size(b) || throw(DimensionMismatch("dual slices must have the same size"))
+    out = similar(Float32.(a))
+    if mode === :A
+        copyto!(out, Float32.(a))
+    elseif mode === :B
+        copyto!(out, Float32.(b))
+    elseif mode === :diff
+        @inbounds for i in eachindex(out, a, b)
+            out[i] = Float32(a[i]) - Float32(b[i])
+        end
+    elseif mode === :ratio
+        @inbounds for i in eachindex(out, a, b)
+            den = Float32(b[i])
+            num = Float32(a[i])
+            out[i] = isfinite(num) && isfinite(den) && den != 0f0 ? num / den : NaN32
+        end
+    elseif mode === :residuals
+        diff = similar(out)
+        @inbounds for i in eachindex(diff, a, b)
+            diff[i] = Float32(a[i]) - Float32(b[i])
+        end
+        μ, σ = finite_mean_std(diff)
+        if !isfinite(σ) || σ <= 0
+            fill!(out, NaN32)
+        else
+            @inbounds for i in eachindex(out, diff)
+                x = Float64(diff[i])
+                out[i] = isfinite(x) ? Float32((x - μ) / σ) : NaN32
+            end
+        end
+    else
+        throw(ArgumentError("unknown dual view mode: $(mode)"))
+    end
+    return out
+end
+
+function _channel_value(data, axis::Integer, u::Integer, v::Integer, chan::Integer)
+    if axis == 1
+        return data[chan, u, v]
+    elseif axis == 2
+        return data[u, chan, v]
+    else
+        return data[u, v, chan]
+    end
+end
+
+"""
+    moments(y; x=1:length(y), threshold=0.0) -> (m0, m1, m2)
+
+Calculate zeroth, first, and second moments using only samples where
+`y > threshold`, matching the project-local `Statistics/Moments.jl` routine.
+"""
+function moments(y; x = 1:length(y), threshold = 0.0)
+    length(x) == length(y) || throw(DimensionMismatch("x and y must have the same length"))
+    acc0 = 0.0
+    acc1 = 0.0
+    any_sample = false
+    @inbounds for i in eachindex(y, x)
+        yi = Float64(y[i])
+        if isfinite(yi) && yi > threshold
+            any_sample = true
+            xi = Float64(x[i])
+            acc0 += yi
+            acc1 += yi * xi
+        end
+    end
+    (!any_sample || acc0 == 0.0) && return (NaN, NaN, NaN)
+    m0 = acc0
+    m1 = acc1 / m0
+    acc2 = 0.0
+    @inbounds for i in eachindex(y, x)
+        yi = Float64(y[i])
+        if isfinite(yi) && yi > threshold
+            xi = Float64(x[i])
+            acc2 += yi * (xi - m1)^2
+        end
+    end
+    m2_2 = acc2 / m0
+    m2 = m2_2 >= 0 ? sqrt(m2_2) : NaN
+    return (m0, m1, m2)
+end
+
+"""
+    moments_map(data, array; threshold=0.0) -> (M0, M1, M2)
+
+Calculate moment maps for a cube whose spectral axis is the third dimension,
+matching `Statistics/Moments.jl`.
+"""
+function moments_map(data::AbstractArray{T,3}, array; threshold = 0.0) where {T}
+    length(array) == size(data, 3) || throw(DimensionMismatch("array length must match size(data, 3)"))
+    M0 = Matrix{Float32}(undef, size(data, 1), size(data, 2))
+    M1 = similar(M0)
+    M2 = similar(M0)
+    @inbounds for i in 1:size(data, 1), j in 1:size(data, 2)
+        m0, m1, m2 = moments(@view(data[i, j, :]); x = array, threshold = threshold)
+        M0[i, j] = Float32(m0)
+        M1[i, j] = Float32(m1)
+        M2[i, j] = Float32(m2)
+    end
+    return M0, M1, M2
+end
+
+"""
+    moment_map(data, axis, order; coords=1:size(data, axis), channels=1:size(data, axis), threshold=0.0)
+
+Compute moment 0, 1, or 2 along `axis`, returning a 2D map in the same
+orientation as `get_slice`. The moment definition is delegated to
+`moments(y; x=coords, threshold=threshold)`.
+"""
+function moment_map(
+    data::AbstractArray{T,3},
+    axis::Integer,
+    order::Integer;
+    coords = collect(Float32, 1:size(data, axis)),
+    channels = 1:size(data, axis),
+    threshold = 0.0,
+) where {T}
+    1 <= axis <= 3 || throw(ArgumentError("axis must be 1, 2, or 3"))
+    order in (0, 1, 2) || throw(ArgumentError("moment order must be 0, 1, or 2"))
+    u_max, v_max = axis == 1 ? (size(data, 2), size(data, 3)) :
+                   axis == 2 ? (size(data, 1), size(data, 3)) :
+                               (size(data, 1), size(data, 2))
+    out = fill(NaN32, u_max, v_max)
+    chan_vec = [c for c in channels if 1 <= c <= size(data, axis)]
+    isempty(chan_vec) && return out
+
+    y = Vector{Float32}(undef, length(chan_vec))
+    x = Vector{Float32}(undef, length(chan_vec))
+    @inbounds for u in 1:u_max, v in 1:v_max
+        for (n, c) in pairs(chan_vec)
+            y[n] = Float32(_channel_value(data, axis, u, v, c))
+            x[n] = Float32(coords[c])
+        end
+        m0, m1, m2 = moments(y; x = x, threshold = threshold)
+        out[u, v] = order == 0 ? Float32(m0) : order == 1 ? Float32(m1) : Float32(m2)
+    end
+    return out
+end
+
+function moment_vectors(data::AbstractMatrix, x; threshold = 0.0)
+    length(x) == size(data, 2) || throw(DimensionMismatch("x length must match size(data, 2)"))
+    M0 = Vector{Float32}(undef, size(data, 1))
+    M1 = similar(M0)
+    M2 = similar(M0)
+    @inbounds for i in 1:size(data, 1)
+        m0, m1, m2 = moments(@view(data[i, :]); x = x, threshold = threshold)
+        M0[i] = Float32(m0)
+        M1[i] = Float32(m1)
+        M2[i] = Float32(m2)
+    end
+    return M0, M1, M2
+end
+
+"""
+    filtered_cube_by_slice(data, axis, sigma) -> Array{Float32,3}
+
+Apply the viewer's 2D Gaussian filter independently to every slice along
+`axis`.
+"""
+function filtered_cube_by_slice(data::AbstractArray{T,3}, axis::Integer, sigma::Real) where {T}
+    1 <= axis <= 3 || throw(ArgumentError("axis must be 1, 2, or 3"))
+    σ = Float32(sigma)
+    σ <= 0 && return Float32.(data)
+    out = similar(Float32.(data))
+    for idx in 1:size(data, axis)
+        s = nan_gaussian_filter(get_slice(data, axis, idx), σ)
+        if axis == 1
+            @views out[idx, :, :] .= s
+        elseif axis == 2
+            @views out[:, idx, :] .= s
+        else
+            @views out[:, :, idx] .= s
+        end
+    end
+    return out
+end
+
 ############################
 # Simple FITS WCS
 ############################
@@ -764,4 +1164,236 @@ Read a viewer settings dict from TOML.
 """
 function load_viewer_settings(path::AbstractString)::Dict{String,Any}
     return Dict{String,Any}(TOML.parsefile(path))
+end
+
+############################
+# Power spectrum
+############################
+
+"""
+    _ps_window1d(kind, n) -> Vector{Float64}
+
+1D apodization window of length `n`. `kind ∈ (:hann, :hamming, :none)`.
+"""
+function _ps_window1d(kind::Symbol, n::Integer)
+    n <= 1 && return ones(Float64, max(n, 0))
+    if kind === :hann
+        return Float64[0.5 - 0.5 * cos(2π * (i - 1) / (n - 1)) for i in 1:n]
+    elseif kind === :hamming
+        return Float64[0.54 - 0.46 * cos(2π * (i - 1) / (n - 1)) for i in 1:n]
+    else
+        return ones(Float64, n)
+    end
+end
+
+"""
+    _ps_apodize_mask(mask, taper) -> Matrix{Float64}
+
+Cosine taper of a binary validity mask. The taper width `taper` (in pixels)
+determines how far inside the valid region the apodization runs to zero at
+the boundary with invalid pixels. Uses an L∞ (Chebyshev) two-pass distance
+transform — only the relative magnitude matters for the cosine taper, so the
+cheap chamfer is sufficient.
+"""
+function _ps_apodize_mask(mask::AbstractMatrix{Bool}, taper::Integer)
+    ny, nx = size(mask)
+    big = float(ny + nx + 1)
+    d = fill(big, ny, nx)
+    @inbounds for i in eachindex(mask)
+        if !mask[i]
+            d[i] = 0.0
+        end
+    end
+    @inbounds for j in 1:nx, i in 1:ny
+        di = d[i, j]
+        if i > 1
+            di = min(di, d[i - 1, j] + 1.0)
+            if j > 1;  di = min(di, d[i - 1, j - 1] + 1.0); end
+            if j < nx; di = min(di, d[i - 1, j + 1] + 1.0); end
+        end
+        if j > 1; di = min(di, d[i, j - 1] + 1.0); end
+        d[i, j] = di
+    end
+    @inbounds for j in nx:-1:1, i in ny:-1:1
+        di = d[i, j]
+        if i < ny
+            di = min(di, d[i + 1, j] + 1.0)
+            if j < nx; di = min(di, d[i + 1, j + 1] + 1.0); end
+            if j > 1;  di = min(di, d[i + 1, j - 1] + 1.0); end
+        end
+        if j < nx; di = min(di, d[i, j + 1] + 1.0); end
+        d[i, j] = di
+    end
+    out = Matrix{Float64}(undef, ny, nx)
+    t = float(max(taper, 1))
+    @inbounds for i in eachindex(mask)
+        if !mask[i]
+            out[i] = 0.0
+        else
+            di = d[i]
+            out[i] = di >= t ? 1.0 : 0.5 * (1.0 - cos(π * di / t))
+        end
+    end
+    return out
+end
+
+"""
+    power_spectrum_2d(img;
+                      window=:hann, demean=true,
+                      pad_pow2=false,
+                      apodize_nan=false, nan_taper=4)
+        -> NamedTuple
+
+Centered (`fftshift`) 2D power spectrum `|F(img)|² / ⟨W_eff²⟩`.
+
+NamedTuple fields:
+  - `P2d::Matrix{Float64}`           shifted power spectrum, size `(ny_eff, nx_eff)`
+  - `ny_in, nx_in::Int`              size of the input image
+  - `ny_eff, nx_eff::Int`            size after optional zero-padding
+  - `padded::Bool`                   `true` iff `pad_pow2` actually grew the array
+  - `window::Symbol`                 effective window kind
+  - `apodized::Bool`                 `true` iff a NaN apodization mask was applied
+  - `f_sky::Float64`                 fraction of finite input pixels
+  - `w_norm::Float64`                `⟨(window × mask)²⟩`, the MASTER-light
+                                     normalization that has already been
+                                     divided out of `P2d`
+
+NaN handling: non-finite pixels are first replaced with zero; the demean
+operates over valid pixels only; with `apodize_nan=true` an L∞-distance
+cosine taper is built around the NaN regions and combined with the spectral
+window. The MASTER-light correction divides the raw `|F|²` by `⟨W_eff²⟩` so
+that, for a stationary signal whose spectrum is locally flat over the window
+support, the recovered amplitude is unbiased to first order.
+"""
+function power_spectrum_2d(img::AbstractMatrix;
+                            window::Symbol = :hann,
+                            demean::Bool = true,
+                            pad_pow2::Bool = false,
+                            apodize_nan::Bool = false,
+                            nan_taper::Integer = 4)
+    A = Float64.(img)
+    ny0, nx0 = size(A)
+    finite_mask = isfinite.(A)
+    n_valid = count(finite_mask)
+    f_sky = isempty(finite_mask) ? 0.0 : n_valid / length(finite_mask)
+    @inbounds for i in eachindex(A)
+        if !finite_mask[i]
+            A[i] = 0.0
+        end
+    end
+    if demean && n_valid > 0
+        s = 0.0
+        @inbounds for i in eachindex(A)
+            if finite_mask[i]; s += A[i]; end
+        end
+        m = s / n_valid
+        if isfinite(m) && m != 0.0
+            @inbounds for i in eachindex(A)
+                if finite_mask[i]; A[i] -= m; end
+            end
+        end
+    end
+    has_invalid = n_valid < length(finite_mask)
+    M = if apodize_nan && has_invalid
+        _ps_apodize_mask(finite_mask, max(Int(nan_taper), 1))
+    elseif has_invalid
+        Float64.(finite_mask)
+    else
+        ones(Float64, ny0, nx0)
+    end
+    wy = _ps_window1d(window, ny0)
+    wx = _ps_window1d(window, nx0)
+    Weff = Matrix{Float64}(undef, ny0, nx0)
+    @inbounds for j in 1:nx0, i in 1:ny0
+        Weff[i, j] = wy[i] * wx[j] * M[i, j]
+        A[i, j] *= Weff[i, j]
+    end
+    ny_eff, nx_eff = ny0, nx0
+    padded = false
+    if pad_pow2
+        ny_eff = nextpow(2, max(ny0, 1))
+        nx_eff = nextpow(2, max(nx0, 1))
+        if ny_eff != ny0 || nx_eff != nx0
+            A_pad = zeros(Float64, ny_eff, nx_eff)
+            @inbounds A_pad[1:ny0, 1:nx0] .= A
+            A = A_pad
+            padded = true
+        end
+    end
+    F = fftshift(fft(A))
+    P2d = abs2.(F)
+    w_norm = isempty(Weff) ? 0.0 : mean(Weff .^ 2)
+    if w_norm > 0
+        P2d ./= w_norm
+    end
+    return (P2d = P2d,
+            ny_in = ny0, nx_in = nx0,
+            ny_eff = ny_eff, nx_eff = nx_eff,
+            padded = padded,
+            window = window,
+            apodized = apodize_nan && has_invalid,
+            f_sky = f_sky,
+            w_norm = w_norm)
+end
+
+"""
+    power_spectrum_1d_radial(P2d) -> (radii::Vector{Float32}, profile::Vector{Float32})
+
+Radial average of a centered 2D power spectrum, binned by integer pixel
+radius from the FFT-shifted DC center. The returned `radii` are pixel-radii
+(0, 1, 2, …); convert to cycles/pixel by dividing by `min(ny, nx)`.
+"""
+function power_spectrum_1d_radial(P2d::AbstractMatrix)
+    ny, nx = size(P2d)
+    cy = (ny + 1) / 2
+    cx = (nx + 1) / 2
+    rmax = floor(Int, min(cy - 1, cx - 1))
+    rmax < 1 && return (Float32[], Float32[])
+    nb = rmax + 1
+    counts = zeros(Float64, nb)
+    sums = zeros(Float64, nb)
+    @inbounds for j in 1:nx, i in 1:ny
+        r = sqrt((i - cy)^2 + (j - cx)^2)
+        b = round(Int, r) + 1
+        if 1 <= b <= nb
+            sums[b] += P2d[i, j]
+            counts[b] += 1
+        end
+    end
+    radii = Float32.(0:rmax)
+    prof = Float32[counts[i] > 0 ? sums[i] / counts[i] : 0.0 for i in 1:nb]
+    return radii, prof
+end
+
+"""
+    fit_loglog_slope(k, p; kmin, kmax) -> (slope, intercept, n_used)
+
+Least-squares fit of `log10(p) = slope·log10(k) + intercept` over the band
+`kmin ≤ k ≤ kmax`. Non-positive `k` and `p` values are dropped. Returns
+`(NaN, NaN, 0)` if fewer than 2 valid points fall in the band.
+"""
+function fit_loglog_slope(k::AbstractVector, p::AbstractVector;
+                          kmin::Real = 0.0, kmax::Real = Inf)
+    length(k) == length(p) || throw(ArgumentError("k and p must have the same length."))
+    xs = Float64[]
+    ys = Float64[]
+    for i in eachindex(k)
+        ki = Float64(k[i]); pi = Float64(p[i])
+        if isfinite(ki) && isfinite(pi) && ki > 0 && pi > 0 && ki >= kmin && ki <= kmax
+            push!(xs, log10(ki)); push!(ys, log10(pi))
+        end
+    end
+    n = length(xs)
+    n < 2 && return (NaN, NaN, n)
+    mx = mean(xs); my = mean(ys)
+    sxx = 0.0; sxy = 0.0
+    @inbounds for i in 1:n
+        dx = xs[i] - mx
+        sxx += dx * dx
+        sxy += dx * (ys[i] - my)
+    end
+    sxx == 0 && return (NaN, NaN, n)
+    slope = sxy / sxx
+    intercept = my - slope * mx
+    return (slope, intercept, n)
 end

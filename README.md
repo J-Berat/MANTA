@@ -1,9 +1,10 @@
-# CartaViewer
+# MANTA
 
 Interactive FITS file viewer in Julia, built with Makie/GLMakie.
 
-`CartaViewer` automatically opens several kinds of FITS data:
+`MANTA` automatically opens several kinds of FITS data:
 
+- standard 2D FITS images, with contrast controls and no slice slider;
 - standard 3D FITS cubes, with slice navigation and a spectrum at the selected voxel;
 - HEALPix FITS maps, displayed in Mollweide projection;
 - 2D HEALPix-PPV cubes, with one map per channel and an associated spectrum.
@@ -18,7 +19,7 @@ Main features:
 - overlay automatic or manual contours;
 - display simple FITS WCS coordinates when `CTYPE/CRVAL/CRPIX/CDELT` headers are present;
 - tune contrast from a visible-slice histogram with percentile presets;
-- apply optional Gaussian smoothing to 3D cubes;
+- apply optional Gaussian smoothing to 3D cubes and projected HEALPix maps;
 - zoom interactively with right-click drag;
 - export images, spectra, and GIFs;
 - save and reload viewer settings.
@@ -45,15 +46,15 @@ as X11 forwarding, VNC, or a desktop session.
 Clone the repository and enter the project directory:
 
 ```bash
-git clone git@github.com:J-Berat/CartaJulia.git
-cd CartaJulia
+git clone git@github.com:J-Berat/MANTA.jl.git
+cd MANTA.jl
 ```
 
 If you prefer HTTPS:
 
 ```bash
-git clone https://github.com/J-Berat/CartaJulia.git
-cd CartaJulia
+git clone https://github.com/J-Berat/MANTA.jl.git
+cd MANTA.jl
 ```
 
 Install and precompile the Julia dependencies:
@@ -70,10 +71,10 @@ project status:
 julia --project=. scripts/setup.jl
 ```
 
-The `carta` launcher is already executable in the repository. If needed:
+The `manta` launcher is already executable in the repository. If needed:
 
 ```bash
-chmod +x carta
+chmod +x manta
 ```
 
 ## Quick Start
@@ -81,7 +82,7 @@ chmod +x carta
 From the repository root, run the demo:
 
 ```bash
-./carta
+./manta
 ```
 
 This creates a synthetic FITS cube at:
@@ -95,19 +96,19 @@ and opens the interactive viewer.
 Run the demo with custom dimensions:
 
 ```bash
-NX=96 NY=72 NZ=48 ./carta
+NX=96 NY=72 NZ=48 ./manta
 ```
 
 Set initial color limits:
 
 ```bash
-VMIN=5 VMAX=1500 ./carta
+VMIN=5 VMAX=1500 ./manta
 ```
 
 You can combine both:
 
 ```bash
-NX=96 NY=72 NZ=48 VMIN=5 VMAX=1500 ./carta
+NX=96 NY=72 NZ=48 VMIN=5 VMAX=1500 ./manta
 ```
 
 ## Open a FITS File
@@ -115,16 +116,16 @@ NX=96 NY=72 NZ=48 VMIN=5 VMAX=1500 ./carta
 Open an existing FITS cube:
 
 ```bash
-./carta path/to/cube.fits
+./manta path/to/cube.fits
 ```
 
 Run setup before opening a file:
 
 ```bash
-./carta --setup path/to/cube.fits
+./manta --setup path/to/cube.fits
 ```
 
-Run the Julia demo directly, without the `carta` launcher:
+Run the Julia demo directly, without the `manta` launcher:
 
 ```bash
 julia --project=. demo/run_demo.jl
@@ -148,16 +149,16 @@ Then load the local module:
 
 ```julia
 push!(LOAD_PATH, "src")
-using CartaViewer
+using MANTA
 
-fig = CartaViewer.carta("path/to/cube.fits"; cmap=:magma)
+fig = MANTA.manta("path/to/cube.fits"; cmap=:magma)
 display(fig)
 ```
 
 Example with options:
 
 ```julia
-fig = CartaViewer.carta(
+fig = MANTA.manta(
     "path/to/cube.fits";
     cmap=:viridis,
     vmin=0,
@@ -181,16 +182,53 @@ Useful options:
 - `activate_gl=false`: useful for tests without an OpenGL context
 - `display_fig=false`: skip automatic display in tests
 
+## RGB Images and Panels
+
+`MANTA` can display RGB/RGBA arrays directly. Pass either a
+`Matrix{RGB/RGBA}` or a numeric stack with 3 or 4 channels in the first or last
+dimension:
+
+```julia
+rgb = MANTA.rgb_image(U, V, W; normalize=:symmetric)
+fig = MANTA.manta(rgb; title="velocity RGB")
+display(fig)
+```
+
+For RGB data stored in a FITS primary HDU as a 3/4-channel stack, opt in with
+`rgb=true`:
+
+```julia
+fig = MANTA.manta("path/to/rgb_stack.fits"; rgb=true)
+```
+
+For 3D scalar cubes, the main viewer can be switched to a synchronized dual
+view after launch: click `Add dual` in the `Output` panel, paste the second
+FITS cube path into the revealed field, then click `Dual`. The second cube must
+have the same `(nx, ny, nz)` size as the primary cube; slice axis, slice index,
+colormap, contrast, contours, regions, and zoom stay synchronized.
+
+Mixed scalar/RGB side-by-side panels are available through `manta_panels`:
+
+```julia
+fig = MANTA.manta_panels(
+    rgb,
+    speed;
+    titles=("RGB composite", "speed"),
+    cmaps=(:viridis, :magma),
+)
+display(fig)
+```
+
 ## HEALPix
 
-`CartaViewer.carta(...)` automatically detects HEALPix files when the header
+`MANTA.manta(...)` automatically detects HEALPix files when the header
 contains `PIXTYPE = HEALPIX`, or when a 2D array matches the expected shape of a
 HEALPix-PPV cube.
 
 HEALPix map:
 
 ```julia
-fig = CartaViewer.carta(
+fig = MANTA.manta(
     "path/to/healpix_map.fits";
     column=1,
     scale=:lin,
@@ -201,10 +239,14 @@ fig = CartaViewer.carta(
 display(fig)
 ```
 
+HEALPix maps and HEALPix-PPV channel maps include a Gaussian smoothing control.
+It filters the Mollweide-projected map with a NaN-aware normalization, so the
+outside of the projection does not bleed into the data.
+
 HEALPix-PPV cube:
 
 ```julia
-fig = CartaViewer.carta(
+fig = MANTA.manta(
     "path/to/healpix_ppv_cube.fits";
     v0=0.0,
     dv=1.0,
@@ -214,13 +256,30 @@ fig = CartaViewer.carta(
 display(fig)
 ```
 
+HEALPix RGB/RGBA pixels can also be passed directly as a vector of length
+`12*nside^2`, or as `npix×3`, `npix×4`, `3×npix`, or `4×npix` numeric arrays:
+
+```julia
+fig = MANTA.manta_healpix(rgb_pixels; nx=1400, ny=700)
+display(fig)
+
+fig = MANTA.manta_healpix_panels(
+    rgb_pixels,
+    scalar_pixels;
+    titles=("RGB", "scalar"),
+)
+display(fig)
+```
+
 Exported HEALPix helpers:
 
-- `carta_healpix`
-- `carta_healpix_cube`
+- `manta_healpix`
+- `manta_healpix_panels`
+- `manta_healpix_cube`
 - `is_healpix_fits`
 - `read_healpix_map`
 - `mollweide_grid`
+- `mollweide_color_grid`
 - `valid_healpix_npix`
 
 ## Development Commands
@@ -240,7 +299,7 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 Check that the project loads:
 
 ```bash
-julia --project=. -e 'push!(LOAD_PATH, "src"); using CartaViewer; println("CartaViewer OK")'
+julia --project=. -e 'push!(LOAD_PATH, "src"); using MANTA; println("MANTA OK")'
 ```
 
 Show the Julia project status:
@@ -265,8 +324,12 @@ julia --project=. -e 'using Pkg; Pkg.status()'
 - `Gaussian filter` and `Gaussian sigma`: smooth the image
 - `Colorbar limits`: apply manual color limits, automatic limits, or percentile contrast presets
 - `Contours`: overlay automatic contours or provide manual contour levels; use `1:red, 2:#00ffaa, 3:blue` for per-level colors
+- `Add dual`: load a second cube and compare `A`, `B`, `A - B`, `A / B`, or normalized residuals
+- `Moment Maps`: compute and display/export moment 0, moment 1, or moment 2 along the active axis
+- `Play`: animate channels interactively with FPS, loop, and ping-pong controls
 - `Save image`: export the current slice
 - `Save spectrum`: export the current spectrum
+- `FITS Products`: export the current slice, averaged region spectrum, moment map, or Gaussian-filtered cube as FITS
 - `Export GIF`: animate slices
 - `Save settings` and `Load settings`: persist or restore the viewer state
 
@@ -297,13 +360,13 @@ By default, exports are saved to the Desktop if that directory exists, otherwise
 to the current working directory. To choose a directory explicitly:
 
 ```julia
-fig = CartaViewer.carta("path/to/cube.fits"; save_dir="outputs")
+fig = MANTA.manta("path/to/cube.fits"; save_dir="outputs")
 ```
 
 Viewer settings can be persisted with:
 
 ```julia
-fig = CartaViewer.carta(
+fig = MANTA.manta(
     "path/to/cube.fits";
     settings_path="viewer_settings.toml",
 )
@@ -332,7 +395,7 @@ positive. Values `<= 0` are converted to `NaN` for these scales.
 If GIF export fails, run the viewer from an active graphical session:
 
 ```bash
-./carta path/to/cube.fits
+./manta path/to/cube.fits
 ```
 
 ## Repository Layout
@@ -341,14 +404,14 @@ If GIF export fails, run the viewer from an active graphical session:
 .
 |-- Project.toml
 |-- README.md
-|-- carta
+|-- manta
 |-- demo/
 |   `-- run_demo.jl
 |-- scripts/
 |   `-- setup.jl
 |-- src/
-|   |-- CartaViewer.jl
-|   |-- CartaHealpix.jl
+|   |-- MANTA.jl
+|   |-- MANTAHealpix.jl
 |   `-- helpers/
 |       `-- Helpers.jl
 `-- test/

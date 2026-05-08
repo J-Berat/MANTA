@@ -1,8 +1,8 @@
 # HEALPix Mollweide viewer with interactive zoom.
 # API publique : `is_healpix_fits`, `read_healpix_map`, `mollweide_grid`,
-# `carta_healpix(filepath; ...)`.
+# `manta_healpix(filepath; ...)`.
 #
-# Compatible avec les conventions de `carta(...)` (zoom right-drag, reset,
+# Compatible avec les conventions de `manta(...)` (zoom right-drag, reset,
 # colormap, vlims, save image, échelles lin/log10/ln).
 
 using GLMakie, CairoMakie, Makie, Observables, FITSIO, LaTeXStrings
@@ -86,6 +86,59 @@ function mollweide_grid(m::Healpix.HealpixMap; nx::Int=1200, ny::Int=600)
         ipix = Healpix.ang2pixRing(res, θhp, φhp)
         v = m.pixels[ipix]
         img[j, i] = (isfinite(v) && v != Healpix.UNSEEN) ? Float32(v) : NaN32
+    end
+    img
+end
+
+"""
+    mollweide_color_grid(pixels; nx=1200, ny=600) -> Matrix{RGBAf}
+
+Reproject a HEALPix RGB/RGBA pixel vector on a Mollweide grid. Pixels outside
+the projection ellipse are transparent.
+"""
+function mollweide_color_grid(pixels::AbstractVector{<:Colorant}; nx::Int=1200, ny::Int=600)
+    nside = valid_healpix_npix(length(pixels))
+    nside > 0 || throw(ArgumentError("RGB HEALPix vector length must be 12*nside^2."))
+    res = Healpix.Resolution(nside)
+    img = fill(RGBAf(1, 1, 1, 0), ny, nx)
+    @inbounds for j in 1:ny, i in 1:nx
+        x = 2 * (2 * (i - 0.5) / nx - 1)
+        y = 2 * (j - 0.5) / ny - 1
+        (x^2 / 4 + y^2 > 1) && continue
+        θaux = asin(y)
+        sinφ = (2θaux + sin(2θaux)) / π
+        abs(sinφ) > 1 && continue
+        lat = asin(sinφ)
+        lon = π * x / (2 * cos(θaux))
+        abs(lon) > π && continue
+        θhp = π/2 - lat
+        φhp = lon < 0 ? lon + 2π : lon
+        ipix = Healpix.ang2pixRing(res, θhp, φhp)
+        img[j, i] = RGBAf(pixels[ipix])
+    end
+    img
+end
+
+function _mollweide_scalar_grid(vals::AbstractVector; nx::Int=1200, ny::Int=600)
+    nside = valid_healpix_npix(length(vals))
+    nside > 0 || throw(ArgumentError("HEALPix vector length must be 12*nside^2."))
+    res = Healpix.Resolution(nside)
+    img = fill(NaN32, ny, nx)
+    @inbounds for j in 1:ny, i in 1:nx
+        x = 2 * (2 * (i - 0.5) / nx - 1)
+        y = 2 * (j - 0.5) / ny - 1
+        (x^2 / 4 + y^2 > 1) && continue
+        θaux = asin(y)
+        sinφ = (2θaux + sin(2θaux)) / π
+        abs(sinφ) > 1 && continue
+        lat = asin(sinφ)
+        lon = π * x / (2 * cos(θaux))
+        abs(lon) > π && continue
+        θhp = π/2 - lat
+        φhp = lon < 0 ? lon + 2π : lon
+        ipix = Healpix.ang2pixRing(res, θhp, φhp)
+        v = Float32(vals[ipix])
+        img[j, i] = isfinite(v) ? v : NaN32
     end
     img
 end
@@ -419,6 +472,116 @@ function set_graticule_visible!(graticule, visible::Bool)
     return graticule
 end
 
+function manta_healpix(
+    pixels::AbstractArray;
+    title::AbstractString = "RGB HEALPix",
+    nx::Int = 1400,
+    ny::Int = 700,
+    figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
+    activate_gl::Bool = true,
+    display_fig::Bool = true,
+    show_graticule::Bool = true,
+)
+    rgb_pixels = as_rgb_pixels(pixels)
+    img = mollweide_color_grid(rgb_pixels; nx=nx, ny=ny)
+    activate_gl ? GLMakie.activate!() : CairoMakie.activate!()
+    fig = Figure(size = _pick_fig_size(figsize))
+    ax = Axis(
+        fig[1, 1];
+        title = make_main_title(title),
+        aspect = DataAspect(),
+        xgridvisible = false,
+        ygridvisible = false,
+        xticksvisible = false,
+        yticksvisible = false,
+        xticklabelsvisible = false,
+        yticklabelsvisible = false,
+        bottomspinevisible = false,
+        topspinevisible = false,
+        leftspinevisible = false,
+        rightspinevisible = false,
+    )
+    image!(ax, (-2f0, 2f0), (-1f0, 1f0), permutedims(img))
+    set_mollweide_view!(ax, -2.0, 2.0, -1.0, 1.0)
+    graticule = draw_mollweide_graticule!(ax)
+    set_graticule_visible!(graticule, show_graticule)
+    ell_x = [2cos(t) for t in LinRange(0, 2π, 200)]
+    ell_y = [sin(t) for t in LinRange(0, 2π, 200)]
+    lines!(ax, ell_x, ell_y; color=:black, linewidth=0.8)
+    keepalive!(fig)
+    on(fig.scene.events.window_open) do is_open
+        is_open || forget!(fig)
+    end
+    display_fig && display(fig)
+    return fig
+end
+
+function manta_healpix_panels(
+    panels::Vararg{Any,N};
+    titles = nothing,
+    cmaps = nothing,
+    clims = nothing,
+    nx::Int = 1400,
+    ny::Int = 700,
+    figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
+    activate_gl::Bool = true,
+    display_fig::Bool = true,
+    show_graticule::Bool = true,
+) where {N}
+    N >= 1 || throw(ArgumentError("Provide at least one HEALPix panel."))
+    activate_gl ? GLMakie.activate!() : CairoMakie.activate!()
+    fig = Figure(size = _pick_fig_size(figsize))
+    title_at(i) = titles === nothing ? "panel $(i)" : String(titles[i])
+    cmap_at(i) = cmaps === nothing ? :inferno : cmaps[i]
+    clim_at(i, vals) = clims === nothing ? clamped_extrema(vals) : clims[i]
+    for (i, panel) in enumerate(panels)
+        ax = Axis(
+            fig[1, i];
+            title = make_main_title(title_at(i)),
+            aspect = DataAspect(),
+            xgridvisible = false,
+            ygridvisible = false,
+            xticksvisible = false,
+            yticksvisible = false,
+            xticklabelsvisible = false,
+            yticklabelsvisible = false,
+            bottomspinevisible = false,
+            topspinevisible = false,
+            leftspinevisible = false,
+            rightspinevisible = false,
+        )
+        if is_rgb_like(panel)
+            img = mollweide_color_grid(as_rgb_pixels(panel); nx=nx, ny=ny)
+            image!(ax, (-2f0, 2f0), (-1f0, 1f0), permutedims(img))
+        else
+            vals = _mollweide_scalar_grid(panel; nx=nx, ny=ny)
+            plot_vals = permutedims(vals)
+            hm = heatmap!(
+                ax,
+                LinRange(-2f0, 2f0, nx),
+                LinRange(-1f0, 1f0, ny),
+                plot_vals;
+                colormap=cmap_at(i),
+                colorrange=clim_at(i, vals),
+                nan_color=:white,
+            )
+            Colorbar(fig[1, N + i], hm; width=16)
+        end
+        set_mollweide_view!(ax, -2.0, 2.0, -1.0, 1.0)
+        graticule = draw_mollweide_graticule!(ax)
+        set_graticule_visible!(graticule, show_graticule)
+        ell_x = [2cos(t) for t in LinRange(0, 2π, 200)]
+        ell_y = [sin(t) for t in LinRange(0, 2π, 200)]
+        lines!(ax, ell_x, ell_y; color=:black, linewidth=0.8)
+    end
+    keepalive!(fig)
+    on(fig.scene.events.window_open) do is_open
+        is_open || forget!(fig)
+    end
+    display_fig && display(fig)
+    return fig
+end
+
 """
     detect_velocity_axis(filepath, ndim) -> (axis, v0, dv, vunit) | nothing
 
@@ -518,7 +681,7 @@ end
 ############################
 
 """
-    carta_healpix(filepath::String;
+    manta_healpix(filepath::String;
                   cmap=:inferno, vmin=nothing, vmax=nothing,
                   invert=false, scale=:lin, column=1,
                   nx=1400, ny=700,
@@ -537,7 +700,7 @@ Visualiseur interactif HEALPix en projection Mollweide.
 
 Retourne la `Figure` GLMakie.
 """
-function carta_healpix(
+function manta_healpix(
     filepath::String;
     cmap::Symbol = :inferno,
     vmin = nothing,
@@ -575,8 +738,13 @@ function carta_healpix(
     end
 
     scale_mode = Observable(scale)
-    img_disp = lift(scale_mode) do m_
-        out = apply_scale(img_raw, m_)
+    gauss_on = Observable(false)
+    sigma = Observable(1.5f0)
+    img_proc = lift(gauss_on, sigma) do on, σ
+        on ? nan_gaussian_filter(img_raw, σ) : img_raw
+    end
+    img_disp = lift(img_proc, scale_mode) do im, m_
+        out = apply_scale(im, m_)
         # protect: NaN/Inf already turned to NaN by apply_scale in log modes
         out2 = similar(out, Float32)
         @inbounds for k in eachindex(out)
@@ -744,6 +912,11 @@ function carta_healpix(
     reset_zoom_btn = Button(ctrl[1,14]; label="Reset zoom", width=120, height=30)
     save_btn       = Button(ctrl[1,15]; label="Save PNG", width=120, height=30)
 
+    gauss_chk = Checkbox(ctrl[2,10])
+    Label(ctrl[2,11], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
+    sigma_label = Label(ctrl[2,12], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
+    sigma_slider = Slider(ctrl[2,13:15]; range=LinRange(0, 10, 101), startvalue=1.5, width=210, height=14)
+
     Label(ctrl[2,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
     region_mode_menu = Menu(ctrl[2,2]; options=["point", "box", "circle"], prompt="point", width=108)
     region_clear_btn = Button(ctrl[2,3]; label="Clear region", width=126, height=30)
@@ -805,6 +978,13 @@ function carta_healpix(
         scale_mode[] = Symbol(sel)
     end
     on(invert_chk.checked) do v; invert_cmap[] = v; end
+    on(gauss_chk.checked) do v
+        gauss_on[] = v
+    end
+    on(sigma_slider.value) do v
+        sigma[] = Float32(v)
+        sigma_label.text[] = latexstring("\\sigma = $(round(v; digits=2))\\,\\text{px}")
+    end
     on(graticule_chk.checked) do v
         show_graticule[] = v
         set_graticule_visible!(graticule, v)
@@ -861,7 +1041,7 @@ function carta_healpix(
         contour_chk.checked[] = true
     end
 
-    # zoom right-drag, identique à `carta`
+    # zoom right-drag, identique à `manta`
     on(events(ax_img).mousebutton) do ev
         if ev.button == Mouse.right && ev.action == Mouse.press
             p = mouseposition(ax_img); any(isnan, p) && return
@@ -961,7 +1141,7 @@ end
 ############################
 
 """
-    carta_healpix_cube(filepath::String;
+    manta_healpix_cube(filepath::String;
                        cmap=:inferno, vmin=nothing, vmax=nothing,
                        invert=false, scale=:lin,
                        v0=0.0, dv=1.0, vunit="km/s",
@@ -984,7 +1164,7 @@ Contrôles :
 
 `v0`, `dv`, `vunit` : axe vitesse `v(j) = v0 + (j-1)*dv` pour le spectre.
 """
-function carta_healpix_cube(
+function manta_healpix_cube(
     filepath::String;
     cmap::Symbol = :inferno,
     vmin = nothing,
@@ -1062,21 +1242,27 @@ function carta_healpix_cube(
     # Cube transposé pour avoir un layout (npix, nv) (col-major friendly)
     cube = vaxis === :last ? Float32.(raw) : Float32.(permutedims(raw))
     fname = String(replace(basename(filepath), r"\.fits(\.gz)?$" => ""))
+    spec_x = Float32.(v0_eff .+ (0:nv-1) .* dv_eff)
+    moment_vecs = moment_vectors(cube, spec_x; threshold = 0.0)
 
     # ---------- Précalcul de l'index Mollweide (une fois) ----------
     res = Healpix.Resolution(nside)
     ipix_grid = mollweide_pixel_index(res, nx, ny)   # 0 = hors ellipse
 
-    function frame_image(j::Int)
+    function projected_vector_image(vals)
         out = fill(NaN32, ny, nx)
         @inbounds for q in eachindex(ipix_grid)
             ip = ipix_grid[q]
             ip == 0 && continue
-            v = cube[ip, j]
+            v = vals[ip]
             out[q] = (isfinite(v) && v != Float32(Healpix.UNSEEN)) ? v : NaN32
         end
         out
     end
+
+    frame_image(j::Int) = projected_vector_image(@view(cube[:, j]))
+    moment_vector(order::Integer) = order == 0 ? moment_vecs[1] : order == 1 ? moment_vecs[2] : moment_vecs[3]
+    moment_label(order::Integer) = order == 0 ? "moment 0" : order == 1 ? "moment 1" : "moment 2"
 
     # ---------- État ----------
     cmap_name   = Observable(cmap)
@@ -1086,11 +1272,18 @@ function carta_healpix_cube(
     end
     scale_mode = Observable(scale)
     chan_idx   = Observable(max(1, nv ÷ 2))
+    show_moment = Observable(false)
+    moment_order = Observable(0)
+    gauss_on = Observable(false)
+    sigma = Observable(1.5f0)
 
-    img_raw = lift(chan_idx) do j
-        frame_image(j)
+    img_raw = lift(chan_idx, show_moment, moment_order) do j, show_mom, ord
+        show_mom ? projected_vector_image(moment_vector(ord)) : frame_image(j)
     end
-    img_disp = lift(img_raw, scale_mode) do im, m_
+    img_proc = lift(img_raw, gauss_on, sigma) do im, on, σ
+        on ? nan_gaussian_filter(im, σ) : im
+    end
+    img_disp = lift(img_proc, scale_mode) do im, m_
         out = apply_scale(im, m_)
         out2 = similar(out, Float32)
         @inbounds for k in eachindex(out)
@@ -1105,6 +1298,25 @@ function carta_healpix_cube(
     # l'image affichée (i.e. l'utilisateur tape les valeurs après log).
     use_manual = Observable(false)
     clims_manual = Observable((0f0, 1f0))
+    function _vector_clims(vals, mode::Symbol)
+        fin = Float32[]
+        if mode === :lin
+            @inbounds for v in vals
+                (isfinite(v) && v != Float32(Healpix.UNSEEN)) && push!(fin, Float32(v))
+            end
+        else
+            f = mode === :log10 ? log10 : log
+            @inbounds for v in vals
+                (isfinite(v) && v != Float32(Healpix.UNSEEN) && v > 0) && push!(fin, Float32(f(v)))
+            end
+        end
+        isempty(fin) && return mode === :lin ? (0f0, 1f0) : (-1f0, 1f0)
+        lo = Float32(quantile(fin, mode === :lin ? 0.01 : 0.05))
+        hi = Float32(quantile(fin, 0.995))
+        lo == hi && (lo = prevfloat(lo); hi = nextfloat(hi))
+        return (lo, hi)
+    end
+
     function _global_clims(mode::Symbol)
         if mode === :lin
             fin = Float32[]
@@ -1123,7 +1335,9 @@ function carta_healpix_cube(
             return (Float32(quantile(fin, 0.05)), Float32(quantile(fin, 0.995)))
         end
     end
-    clims_auto = lift(scale_mode) do m_; _global_clims(m_); end
+    clims_auto = lift(scale_mode, show_moment, moment_order) do m_, show_mom, ord
+        show_mom ? _vector_clims(moment_vector(ord), m_) : _global_clims(m_)
+    end
 
     if vmin !== nothing && vmax !== nothing
         a, b = Float32(vmin), Float32(vmax)
@@ -1174,7 +1388,6 @@ function carta_healpix_cube(
     sel_xy    = Observable(Point2f(NaN32, NaN32))
     sel_label = Observable(latexstring("\\text{click on map to select a pixel}"))
 
-    spec_x = Float32.(v0_eff .+ (0:nv-1) .* dv_eff)
     spec_y_obs = Observable(zeros(Float32, nv))
     function update_spectrum!(ip::Int)
         if 1 ≤ ip ≤ npix
@@ -1213,7 +1426,10 @@ function carta_healpix_cube(
     # Carte
     map_grid = main_grid[1, 1] = GridLayout()
     is_channel_axis = (vunit_eff == "channel")
-    title_obs = lift(chan_idx) do j
+    title_obs = lift(chan_idx, show_moment, moment_order) do j, show_mom, ord
+        if show_mom
+            return latexstring("\\text{", latex_safe(fname), "}\\;\\text{", latex_safe(moment_label(ord)), "}")
+        end
         v = v0_eff + (j-1)*dv_eff
         if is_channel_axis
             latexstring("\\text{", latex_safe(fname), "}\\;\\text{ch}=", j)
@@ -1269,7 +1485,10 @@ function carta_healpix_cube(
     end
     scatter!(ax_img, marker_pts; color=ui_accent, markersize=12, marker=:cross)
 
-    Colorbar(map_grid[1, 2], hm; label=data_unit_tex, width=18)
+    map_unit_label = lift(show_moment, moment_order) do show_mom, ord
+        show_mom ? latexstring("\\text{", latex_safe(moment_label(ord)), "}") : data_unit_tex
+    end
+    Colorbar(map_grid[1, 2], hm; label=map_unit_label, width=18)
 
     # Spectre
     # Affiché dans le même espace que la carte (lin/log10/ln) → cohérence
@@ -1360,6 +1579,11 @@ function carta_healpix_cube(
     reset_btn    = Button(ctrl[1,17]; label="Reset zoom", width=120, height=30)
     save_btn     = Button(ctrl[1,18]; label="Save PNG",   width=110, height=30)
 
+    gauss_chk = Checkbox(ctrl[2,10])
+    Label(ctrl[2,11], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
+    sigma_label = Label(ctrl[2,12], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
+    sigma_slider = Slider(ctrl[2,13:16]; range=LinRange(0, 10, 101), startvalue=1.5, width=220, height=14)
+
     Label(ctrl[2,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
     region_mode_menu = Menu(ctrl[2,2]; options=["point", "box", "circle"], prompt="point", width=108)
     region_clear_btn = Button(ctrl[2,3]; label="Clear region", width=126, height=30)
@@ -1370,6 +1594,12 @@ function carta_healpix_cube(
     contour_levels_box = Textbox(ctrl[2,8]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
     contour_apply_btn = Button(ctrl[2,9]; label="Apply", width=80, height=30)
     contour_chk.checked[] = show_contours[]
+
+    Label(ctrl[3,1], text=L"\text{Moment}", halign=:left, tellwidth=false, fontsize=15)
+    moment_menu = Menu(ctrl[3,2]; options=["M0 integrated", "M1 mean", "M2 dispersion"], prompt="M0 integrated", width=138)
+    show_moment_btn = Button(ctrl[3,3]; label="Show", width=80, height=30)
+    show_channel_btn = Button(ctrl[3,4]; label="Channel", width=92, height=30)
+    save_moment_fits_btn = Button(ctrl[3,5]; label="Save moment FITS", width=150, height=30)
 
     if use_manual[]
         a, b = clims_manual[]
@@ -1433,6 +1663,13 @@ function carta_healpix_cube(
         scale_mode[] = new_mode
     end
     on(invert_chk.checked) do v; invert_cmap[] = v; end
+    on(gauss_chk.checked) do v
+        gauss_on[] = v
+    end
+    on(sigma_slider.value) do v
+        sigma[] = Float32(v)
+        sigma_label.text[] = latexstring("\\sigma = $(round(v; digits=2))\\,\\text{px}")
+    end
     on(graticule_chk.checked) do v
         show_graticule[] = v
         set_graticule_visible!(graticule, v)
@@ -1495,6 +1732,23 @@ function carta_healpix_cube(
         set_box_text!(contour_levels_box, use_man ? format_contour_specs(levels, colors) : "")
         show_contours[] = true
         contour_chk.checked[] = true
+    end
+    on(moment_menu.selection) do sel
+        sel === nothing && return
+        label = String(sel)
+        moment_order[] = startswith(label, "M1") ? 1 : startswith(label, "M2") ? 2 : 0
+    end
+    on(show_moment_btn.clicks) do _
+        show_moment[] = true
+        use_manual[] = false
+        set_box_text!(clim_min_box, "")
+        set_box_text!(clim_max_box, "")
+    end
+    on(show_channel_btn.clicks) do _
+        show_moment[] = false
+        use_manual[] = false
+        set_box_text!(clim_min_box, "")
+        set_box_text!(clim_max_box, "")
     end
     on(scale_mode)        do _; _refresh_spec_ylim!(); end
     on(spec_y_disp)       do _; _refresh_spec_ylim!(); end
@@ -1565,6 +1819,18 @@ function carta_healpix_cube(
         out = joinpath(save_root, "$(fname)_ch$(chan_idx[]).png")
         try CairoMakie.save(String(out), fig; backend=CairoMakie); @info "Saved" out
         catch e; @error "Failed to save" exception=(e, catch_backtrace()) end
+    end
+    on(save_moment_fits_btn.clicks) do _
+        label = replace(moment_label(moment_order[]), " " => "")
+        out = joinpath(save_root, "$(fname)_$(label)_healpix.fits")
+        try
+            FITS(String(out), "w") do f
+                write(f, Float32.(moment_vector(moment_order[])))
+            end
+            @info "Saved moment FITS" out
+        catch e
+            @error "Failed to save moment FITS" exception=(e, catch_backtrace())
+        end
     end
 
     # init

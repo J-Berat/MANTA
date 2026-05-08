@@ -18,10 +18,10 @@ import Pkg
 Pkg.activate(".")
 Pkg.instantiate()
 push!(LOAD_PATH, "src")
-using CartaViewer
+using MANTA
 
 fits_path = abspath(ARGS[1])
-fig = CartaViewer.carta(fits_path; cmap=:magma, invert=false)
+fig = MANTA.manta(fits_path; cmap=:magma, invert=false)
 display(fig)
 while isopen(fig.scene)
     sleep(0.1)

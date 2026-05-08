@@ -1,21 +1,21 @@
 # Docker
 
-Build the CartaJulia image:
+Build the MANTA.jl image:
 
 ```bash
-docker build -t carta-julia .
+docker build -t manta .
 ```
 
 Run the test suite inside the container:
 
 ```bash
-docker run --rm carta-julia julia --project=. -e 'import Pkg; Pkg.test()'
+docker run --rm manta julia --project=. -e 'import Pkg; Pkg.test()'
 ```
 
 Run a headless GLMakie smoke test:
 
 ```bash
-docker run --rm carta-julia xvfb-run -a julia --project=. -e 'using GLMakie; display(GLMakie.Figure()); sleep(2)'
+docker run --rm manta xvfb-run -a julia --project=. -e 'using GLMakie; display(GLMakie.Figure()); sleep(2)'
 ```
 
 ## Interactive window on Linux
@@ -29,7 +29,7 @@ docker run --rm -it \
   -e LIBGL_ALWAYS_SOFTWARE=1 \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   -v "$PWD/demo/output:/app/demo/output" \
-  carta-julia
+  manta
 ```
 
 Open a FITS file by mounting its directory:
@@ -40,7 +40,7 @@ docker run --rm -it \
   -e LIBGL_ALWAYS_SOFTWARE=1 \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   -v "$PWD/data:/data:ro" \
-  carta-julia /data/cube.fits
+  manta /data/cube.fits
 ```
 
 ## Interactive window on macOS with XQuartz
@@ -54,7 +54,7 @@ docker run --rm -it \
   -e DISPLAY=host.docker.internal:0 \
   -e LIBGL_ALWAYS_SOFTWARE=1 \
   -v "$PWD/demo/output:/app/demo/output" \
-  carta-julia
+  manta
 ```
 
 For a FITS file on macOS:
@@ -64,7 +64,7 @@ docker run --rm -it \
   -e DISPLAY=host.docker.internal:0 \
   -e LIBGL_ALWAYS_SOFTWARE=1 \
   -v "$PWD/data:/data:ro" \
-  carta-julia /data/cube.fits
+  manta /data/cube.fits
 ```
 
 The image uses Julia 1.11, matching the package compatibility range in

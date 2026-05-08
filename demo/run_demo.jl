@@ -20,7 +20,7 @@ end
 _ensure_deps!()
 
 push!(LOAD_PATH, joinpath(@__DIR__, "..", "src"))
-using CartaViewer
+using MANTA
 using FITSIO
 
 # Non-negative synthetic cube (avoids log-scale NaNs).
@@ -68,7 +68,7 @@ write_fits(fits_path, cube)
 @debug "FITS ready" path=fits_path size=size(cube)
 
 # Launch UI
-fig = CartaViewer.carta(
+fig = MANTA.manta(
     fits_path;
     cmap=:magma,
     vmin=vmin,

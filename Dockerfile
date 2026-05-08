@@ -34,10 +34,10 @@ RUN apt-get update \
 ARG UID=1000
 ARG GID=1000
 
-RUN groupadd --gid "${GID}" carta \
-    && useradd --uid "${UID}" --gid "${GID}" --create-home --shell /bin/bash carta \
+RUN groupadd --gid "${GID}" manta \
+    && useradd --uid "${UID}" --gid "${GID}" --create-home --shell /bin/bash manta \
     && mkdir -p /app /opt/julia-depot \
-    && chown -R carta:carta /app /opt/julia-depot
+    && chown -R manta:manta /app /opt/julia-depot
 
 ENV JULIA_DEPOT_PATH=/opt/julia-depot \
     JULIA_PROJECT=/app \
@@ -46,29 +46,29 @@ ENV JULIA_DEPOT_PATH=/opt/julia-depot \
     PATH="/usr/local/julia/bin:${PATH}"
 
 WORKDIR /app
-USER carta
+USER manta
 
-COPY --chown=carta:carta Project.toml ./
+COPY --chown=manta:manta Project.toml ./
 RUN julia --project=. -e 'import Pkg; Pkg.instantiate()'
 
-COPY --chown=carta:carta src ./src
-COPY --chown=carta:carta demo ./demo
-COPY --chown=carta:carta scripts ./scripts
-COPY --chown=carta:carta test ./test
-COPY --chown=carta:carta carta ./
-RUN chmod +x /app/carta
+COPY --chown=manta:manta src ./src
+COPY --chown=manta:manta demo ./demo
+COPY --chown=manta:manta scripts ./scripts
+COPY --chown=manta:manta test ./test
+COPY --chown=manta:manta manta ./
+RUN chmod +x /app/manta
 
 RUN xvfb-run -a julia --project=. -e 'import Pkg; Pkg.precompile()'
 
-COPY --chown=carta:carta README.md DOCKER.md ./
+COPY --chown=manta:manta README.md DOCKER.md ./
 
 USER root
-COPY docker-entrypoint.sh /usr/local/bin/carta-docker-entrypoint
-RUN chmod 0755 /usr/local/bin/carta-docker-entrypoint \
-    && chown -R carta:carta /app /opt/julia-depot
+COPY docker-entrypoint.sh /usr/local/bin/manta-docker-entrypoint
+RUN chmod 0755 /usr/local/bin/manta-docker-entrypoint \
+    && chown -R manta:manta /app /opt/julia-depot
 
-USER carta
+USER manta
 ENV JULIA_PKG_PRECOMPILE_AUTO=1
 
-ENTRYPOINT ["carta-docker-entrypoint"]
+ENTRYPOINT ["manta-docker-entrypoint"]
 CMD []

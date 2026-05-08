@@ -3,7 +3,7 @@ using Test
 
 # load the local module
 push!(LOAD_PATH, joinpath(@__DIR__, "..", "src"))
-using CartaViewer
+using MANTA
 
 # deps used by the helpers
 using Observables
@@ -16,9 +16,9 @@ using Healpix
 
 @testset "helpers: scaling" begin
     A = Float32.([1, 10, 100, 0, -1])
-    lin = CartaViewer.apply_scale(A, :lin)
-    log10v = CartaViewer.apply_scale(A, :log10)
-    lnv = CartaViewer.apply_scale(A, :ln)
+    lin = MANTA.apply_scale(A, :lin)
+    log10v = MANTA.apply_scale(A, :log10)
+    lnv = MANTA.apply_scale(A, :ln)
 
     @test eltype(lin) == Float32
     @test eltype(log10v) == Float32
@@ -30,27 +30,32 @@ using Healpix
     @test isfinite(lnv[1])
     @test !isfinite(lnv[4]) && !isfinite(lnv[5])
 
-    mn, mx = CartaViewer.clamped_extrema(Float32.([1, 2, 3]))
+    mn, mx = MANTA.clamped_extrema(Float32.([1, 2, 3]))
     @test mn == 1f0 && mx == 3f0
 
-    mn2, mx2 = CartaViewer.clamped_extrema(Float32.([5, 5, 5]))
+    mn2, mx2 = MANTA.clamped_extrema(Float32.([5, 5, 5]))
     @test mn2 < 5.0f0 && mx2 > 5.0f0
 
-    mn3, mx3 = CartaViewer.clamped_extrema(Float32.([NaN32, NaN32]))
+    mn3, mx3 = MANTA.clamped_extrema(Float32.([NaN32, NaN32]))
     @test mn3 == 0f0 && mx3 == 1f0
 
-    mn4, mx4 = CartaViewer.clamped_extrema(Float32.([]))
+    mn4, mx4 = MANTA.clamped_extrema(Float32.([]))
     @test mn4 == 0f0 && mx4 == 1f0
 
-    p1, p99 = CartaViewer.percentile_clims(Float32.(1:100), 1, 99)
+    p1, p99 = MANTA.percentile_clims(Float32.(1:100), 1, 99)
     @test p1 >= 1f0 && p99 <= 100f0 && p1 < p99
 
-    hx, hy = CartaViewer.histogram_counts(Float32.(1:10); bins = 5)
+    hx, hy = MANTA.histogram_counts(Float32.(1:10); bins = 5)
     @test length(hx) == 5
     @test length(hy) == 5
     @test sum(hy) == 10f0
 
-    levels = CartaViewer.automatic_contour_levels(Float32.(1:100); n = 6)
+    smoothed = MANTA.nan_gaussian_filter(Float32[NaN 1 1; NaN 1 1; NaN NaN NaN], 1.0)
+    @test size(smoothed) == (3, 3)
+    @test isfinite(smoothed[2, 2])
+    @test isnan(MANTA.nan_gaussian_filter(fill(NaN32, 3, 3), 1.0)[2, 2])
+
+    levels = MANTA.automatic_contour_levels(Float32.(1:100); n = 6)
     @test length(levels) == 6
     @test issorted(levels)
 end
@@ -59,42 +64,75 @@ end
     # bijection uv <-> ijk depending on the axis
     for axis in 1:3
         i, j, k = 3, 2, 1
-        u, v = CartaViewer.ijk_to_uv(i, j, k, axis)
-        ii, jj, kk = CartaViewer.uv_to_ijk(u, v, axis, axis == 1 ? i : axis == 2 ? j : k)
+        u, v = MANTA.ijk_to_uv(i, j, k, axis)
+        ii, jj, kk = MANTA.uv_to_ijk(u, v, axis, axis == 1 ? i : axis == 2 ? j : k)
         @test (ii, jj, kk) == (i, j, k)
     end
 
     # get_slice dims and type
     data = Array{Float32}(undef, 7, 5, 4)
     fill!(data, 1f0)
-    s1 = CartaViewer.get_slice(data, 1, 2)
-    s2 = CartaViewer.get_slice(data, 2, 3)
-    s3 = CartaViewer.get_slice(data, 3, 1)
+    s1 = MANTA.get_slice(data, 1, 2)
+    s2 = MANTA.get_slice(data, 2, 3)
+    s3 = MANTA.get_slice(data, 3, 1)
     @test size(s1) == (size(data, 2), size(data, 3))
     @test size(s2) == (size(data, 1), size(data, 3))
     @test size(s3) == (size(data, 1), size(data, 2))
     @test eltype(s1) == Float32 && eltype(s2) == Float32 && eltype(s3) == Float32
 
-    box_uv = CartaViewer.region_uv_indices(10, 10, 2, 3, 4, 5, :box)
+    box_uv = MANTA.region_uv_indices(10, 10, 2, 3, 4, 5, :box)
     @test (3, 2) in box_uv
     @test (5, 4) in box_uv
 
-    circle_uv = CartaViewer.region_uv_indices(10, 10, 5, 5, 7, 5, :circle)
+    circle_uv = MANTA.region_uv_indices(10, 10, 5, 5, 7, 5, :circle)
     @test (5, 5) in circle_uv
     @test (5, 7) in circle_uv
     @test (1, 1) ∉ circle_uv
 
     cube = reshape(Float32.(1:24), 2, 3, 4)
-    spec = CartaViewer.mean_region_spectrum(cube, 3, [(1, 1), (2, 1)])
+    spec = MANTA.mean_region_spectrum(cube, 3, [(1, 1), (2, 1)])
     @test length(spec) == 4
     @test spec[1] == mean(Float32[cube[1, 1, 1], cube[2, 1, 1]])
 end
 
+@testset "helpers: products" begin
+    @test MANTA.moments(Float32[-1, 0, 2, 3]; x = Float32[10, 20, 30, 40]) == (5.0, 36.0, sqrt(24.0))
+    @test all(isnan, MANTA.moments(Float32[-1, 0]; x = Float32[1, 2]))
+
+    a = Float32[2 4; 6 8]
+    b = Float32[1 2; 0 4]
+    @test MANTA.dual_view_product(a, b, :A) == a
+    @test MANTA.dual_view_product(a, b, :B) == b
+    @test MANTA.dual_view_product(a, b, :diff) == Float32[1 2; 6 4]
+    ratio = MANTA.dual_view_product(a, b, :ratio)
+    @test ratio[1, 1] == 2f0
+    @test isnan(ratio[2, 1])
+    resid = MANTA.dual_view_product(a, b, :residuals)
+    @test isapprox(mean(vec(resid)), 0f0; atol = 1f-6)
+
+    cube = Array{Float32}(undef, 2, 2, 3)
+    cube[:, :, 1] .= 1f0
+    cube[:, :, 2] .= 2f0
+    cube[:, :, 3] .= 3f0
+    m0 = MANTA.moment_map(cube, 3, 0; coords = Float32[10, 20, 30])
+    m1 = MANTA.moment_map(cube, 3, 1; coords = Float32[10, 20, 30])
+    M0, M1, M2 = MANTA.moments_map(cube, Float32[10, 20, 30])
+    @test all(==(6f0), m0)
+    @test M0 == m0
+    @test M1 == m1
+    @test all(isfinite, M2)
+    @test all(isapprox.(m1, Ref(Float32((10 + 40 + 90) / 6)); atol = 1f-5))
+    mv0, mv1, mv2 = MANTA.moment_vectors(Float32[0 2 3; -1 0 4], Float32[1, 2, 3])
+    @test mv0 == Float32[5, 4]
+    @test isfinite(mv1[1]) && isfinite(mv2[1])
+    @test MANTA.filtered_cube_by_slice(cube, 3, 0) == cube
+end
+
 @testset "healpix: mollweide graticule geometry" begin
     for lon in (-120, -30, 0, 45, 150), lat in (-60, -15, 0, 35, 70)
-        p = CartaViewer.mollweide_lonlat_to_xy(lon, lat)
+        p = MANTA.mollweide_lonlat_to_xy(lon, lat)
         @test p !== nothing
-        ll = CartaViewer.mollweide_xy_to_lonlat(p[1], p[2])
+        ll = MANTA.mollweide_xy_to_lonlat(p[1], p[2])
         @test ll !== nothing
         lon2, lat2 = ll
         @test isapprox(lon2, lon; atol=1e-4)
@@ -108,29 +146,29 @@ end
         3 3 4 0
         5 6 6 7
     ]
-    box_ips = CartaViewer.projected_region_ipix(grid, -2, -1, 2, 1, :box)
+    box_ips = MANTA.projected_region_ipix(grid, -2, -1, 2, 1, :box)
     @test box_ips == [1, 2, 3, 4, 5, 6, 7]
 
-    circle_ips = CartaViewer.projected_region_ipix(grid, 0, 0, 1, 0, :circle)
+    circle_ips = MANTA.projected_region_ipix(grid, 0, 0, 1, 0, :circle)
     @test all(>(0), circle_ips)
     @test issorted(circle_ips)
 
     vals = Float32[10, 20, NaN32, 40]
-    @test CartaViewer.healpix_region_mean(vals, [1, 2, 3]) == 15f0
+    @test MANTA.healpix_region_mean(vals, [1, 2, 3]) == 15f0
 
     cube = Float32[
         1 10 100
         3 30 300
         NaN 40 400
     ]
-    spec = CartaViewer.healpix_region_mean_spectrum(cube, [1, 2, 3], 3)
+    spec = MANTA.healpix_region_mean_spectrum(cube, [1, 2, 3], 3)
     @test spec == Float32[2, 80 / 3, 800 / 3]
 end
 
 @testset "helpers: latex" begin
-    s = CartaViewer.make_info_tex(1, 2, 3, 4, 5, 6f0)
-    t1 = CartaViewer.make_slice_title("fname", 3, 10)
-    t2 = CartaViewer.make_spec_title(1, 2, 3)
+    s = MANTA.make_info_tex(1, 2, 3, 4, 5, 6f0)
+    t1 = MANTA.make_slice_title("fname", 3, 10)
+    t2 = MANTA.make_spec_title(1, 2, 3)
 
     @test s isa LaTeXString
     @test t1 isa LaTeXString
@@ -152,7 +190,7 @@ end
 
 @testset "helpers: io" begin
     # to_cmap
-    cm = CartaViewer.to_cmap(:viridis)
+    cm = MANTA.to_cmap(:viridis)
     @test length(cm) > 0
     @test cm[1] isa ColorTypes.Colorant
 
@@ -161,69 +199,108 @@ end
         stored_string::Observable{String}
     end
     tb = MockTB(Observable("   hello world   "))
-    @test CartaViewer.get_box_str(tb) == "hello world"
+    @test MANTA.get_box_str(tb) == "hello world"
     
     struct MockDisplayTB
         displayed_string::Observable{String}
     end
     tb2 = MockDisplayTB(Observable("   fallback value   "))
-    @test CartaViewer.get_box_str(tb2) == "fallback value"
+    @test MANTA.get_box_str(tb2) == "fallback value"
+end
+
+@testset "RGB helpers and direct viewers" begin
+    r = Float32[-1 0; 1 2]
+    g = Float32[0 1; 2 3]
+    b = Float32[3 2; 1 0]
+    rgb = MANTA.rgb_image(r, g, b)
+    @test size(rgb) == (2, 2)
+    @test eltype(rgb) <: ColorTypes.Colorant
+
+    stack_last = zeros(Float32, 2, 3, 3)
+    stack_last[:, :, 1] .= 1
+    img_last = MANTA.as_rgb_image(stack_last)
+    @test size(img_last) == (2, 3)
+
+    stack_first = zeros(Float32, 3, 2, 3)
+    stack_first[2, :, :] .= 1
+    img_first = MANTA.as_rgb_image(stack_first)
+    @test size(img_first) == (2, 3)
+
+    hpix_rgb = [RGBf(i / 12, 0.25, 1 - i / 12) for i in 1:12]
+    @test length(MANTA.as_rgb_pixels(hpix_rgb)) == 12
+    @test length(MANTA.as_rgb_pixels(Float32.(reshape(1:36, 12, 3)) ./ 36)) == 12
+
+    fig_rgb = MANTA.manta(rgb; activate_gl=false, display_fig=false, figsize=(500, 400))
+    @test fig_rgb isa Makie.Figure
+    MANTA.forget!(fig_rgb)
+
+    fig_panels = MANTA.manta_panels(rgb, r; activate_gl=false, display_fig=false, figsize=(700, 400))
+    @test fig_panels isa Makie.Figure
+    MANTA.forget!(fig_panels)
+
+    fig_hpix_rgb = MANTA.manta_healpix(hpix_rgb; activate_gl=false, display_fig=false, nx=60, ny=30, figsize=(500, 320))
+    @test fig_hpix_rgb isa Makie.Figure
+    MANTA.forget!(fig_hpix_rgb)
+
+    fig_hpix_panels = MANTA.manta_healpix_panels(hpix_rgb, Float32.(1:12); activate_gl=false, display_fig=false, nx=60, ny=30, figsize=(700, 320))
+    @test fig_hpix_panels isa Makie.Figure
+    MANTA.forget!(fig_hpix_panels)
 end
 
 @testset "helpers: ui" begin
     # explicit override
-    @test CartaViewer._pick_fig_size((111, 222)) == (111, 222)
+    @test MANTA._pick_fig_size((111, 222)) == (111, 222)
     # default when no explicit size is provided
-    @test CartaViewer._pick_fig_size(nothing) == (1800, 1000)
+    @test MANTA._pick_fig_size(nothing) == (1800, 1000)
 end
 
 @testset "helpers: validation" begin
-    ok, use_manual, clims, msg = CartaViewer.parse_manual_clims("1.5", "2.5")
+    ok, use_manual, clims, msg = MANTA.parse_manual_clims("1.5", "2.5")
     @test ok && use_manual
     @test clims == (1.5f0, 2.5f0)
     @test !isempty(msg)
 
-    ok2, use_manual2, _, _ = CartaViewer.parse_manual_clims("", "")
+    ok2, use_manual2, _, _ = MANTA.parse_manual_clims("", "")
     @test ok2 && !use_manual2
 
-    ok3, use_manual3, _, _ = CartaViewer.parse_manual_clims("9", "2")
+    ok3, use_manual3, _, _ = MANTA.parse_manual_clims("9", "2")
     @test ok3 && use_manual3
 
-    ok4, _, _, _ = CartaViewer.parse_manual_clims("a", "2")
+    ok4, _, _, _ = MANTA.parse_manual_clims("a", "2")
     @test !ok4
 
-    gok, frames, fps, _ = CartaViewer.parse_gif_request("1", "5", "2", "10", 10)
+    gok, frames, fps, _ = MANTA.parse_gif_request("1", "5", "2", "10", 10)
     @test gok
     @test frames == [1, 3, 5]
     @test fps == 10
 
-    gok2, frames2, _, _ = CartaViewer.parse_gif_request("5", "1", "2", "12", 10; pingpong = true)
+    gok2, frames2, _, _ = MANTA.parse_gif_request("5", "1", "2", "12", 10; pingpong = true)
     @test gok2
     @test frames2 == [1, 3, 5, 3]
 
-    gok3, _, _, _ = CartaViewer.parse_gif_request("1", "5", "0", "12", 10)
+    gok3, _, _, _ = MANTA.parse_gif_request("1", "5", "0", "12", 10)
     @test !gok3
 
-    cok, cmanual, clevels, _ = CartaViewer.parse_contour_levels("1, 2  3")
+    cok, cmanual, clevels, _ = MANTA.parse_contour_levels("1, 2  3")
     @test cok && cmanual
     @test clevels == Float32[1, 2, 3]
 
-    cok2, cmanual2, _, _ = CartaViewer.parse_contour_levels("")
+    cok2, cmanual2, _, _ = MANTA.parse_contour_levels("")
     @test cok2 && !cmanual2
 
-    cok3, _, _, _ = CartaViewer.parse_contour_levels("1, nope")
+    cok3, _, _, _ = MANTA.parse_contour_levels("1, nope")
     @test !cok3
 
-    sok, smanual, slevels, scolors, _ = CartaViewer.parse_contour_specs("3:blue, 1:red, 2:#00ffaa")
+    sok, smanual, slevels, scolors, _ = MANTA.parse_contour_specs("3:blue, 1:red, 2:#00ffaa")
     @test sok && smanual
     @test slevels == Float32[1, 2, 3]
     @test scolors == ["red", "#00ffaa", "blue"]
-    @test CartaViewer.format_contour_specs(slevels, scolors) == "1:red, 2:#00ffaa, 3:blue"
+    @test MANTA.format_contour_specs(slevels, scolors) == "1:red, 2:#00ffaa, 3:blue"
 
-    color_values = CartaViewer.contour_color_values(scolors, length(slevels), RGBAf(0, 0, 0, 1))
+    color_values = MANTA.contour_color_values(scolors, length(slevels), RGBAf(0, 0, 0, 1))
     @test length(color_values) == 3
 
-    bad_color, _, _, _, _ = CartaViewer.parse_contour_specs("1:not_a_color")
+    bad_color, _, _, _, _ = MANTA.parse_contour_specs("1:not_a_color")
     @test !bad_color
 end
 
@@ -240,16 +317,16 @@ end
         "CRPIX2" => 2.0,
         "CDELT2" => 0.25,
     )
-    wcs = CartaViewer.read_simple_wcs(header, 3)
-    @test CartaViewer.has_wcs(wcs, 1)
-    @test CartaViewer.has_wcs(wcs, 2)
-    @test !CartaViewer.has_wcs(wcs, 3)
-    @test CartaViewer.world_coord(wcs, 1, 3) == 119.0
-    @test occursin("RA", String(CartaViewer.wcs_axis_label(wcs, 1)))
-    @test occursin("RA---TAN", CartaViewer.format_world_coord(wcs, 1, 1))
-    @test CartaViewer.data_unit_label(Dict{String,Any}("BUNIT" => "K")) == "K"
-    @test CartaViewer.data_unit_label(Dict{String,Any}("BUNIT" => "   ")) == "value"
-    @test CartaViewer.data_unit_label(nothing) == "value"
+    wcs = MANTA.read_simple_wcs(header, 3)
+    @test MANTA.has_wcs(wcs, 1)
+    @test MANTA.has_wcs(wcs, 2)
+    @test !MANTA.has_wcs(wcs, 3)
+    @test MANTA.world_coord(wcs, 1, 3) == 119.0
+    @test occursin("RA", String(MANTA.wcs_axis_label(wcs, 1)))
+    @test occursin("RA---TAN", MANTA.format_world_coord(wcs, 1, 1))
+    @test MANTA.data_unit_label(Dict{String,Any}("BUNIT" => "K")) == "K"
+    @test MANTA.data_unit_label(Dict{String,Any}("BUNIT" => "   ")) == "value"
+    @test MANTA.data_unit_label(nothing) == "value"
 end
 
 @testset "helpers: settings io" begin
@@ -263,17 +340,17 @@ end
             "clim_min" => 0.1,
             "clim_max" => 42.0,
         )
-        CartaViewer.save_viewer_settings(settings_path, payload)
+        MANTA.save_viewer_settings(settings_path, payload)
         @test isfile(settings_path)
 
-        restored = CartaViewer.load_viewer_settings(settings_path)
+        restored = MANTA.load_viewer_settings(settings_path)
         @test restored["axis"] == 2
         @test restored["img_scale"] == "log10"
         @test restored["use_manual_clims"] == true
     end
 end
 
-@testset "integration: carta smoke and errors" begin
+@testset "integration: manta smoke and errors" begin
     mktempdir() do tmp
         cube_path = joinpath(tmp, "cube3d.fits")
         cube = reshape(Float32.(1:60), 3, 4, 5)
@@ -281,7 +358,7 @@ end
             write(f, cube)
         end
 
-        fig = CartaViewer.carta(
+        fig = MANTA.manta(
             cube_path;
             activate_gl = false,
             display_fig = false,
@@ -290,14 +367,30 @@ end
             figsize = (800, 500),
         )
         @test fig isa Makie.Figure
-        CartaViewer.forget!(fig)
+        MANTA.forget!(fig)
+
+        rgb_path = joinpath(tmp, "rgb_stack.fits")
+        rgb_stack = zeros(Float32, 2, 3, 3)
+        rgb_stack[:, :, 1] .= 1
+        FITS(rgb_path, "w") do f
+            write(f, rgb_stack)
+        end
+        fig_rgb_path = MANTA.manta(
+            rgb_path;
+            rgb = true,
+            activate_gl = false,
+            display_fig = false,
+            figsize = (500, 360),
+        )
+        @test fig_rgb_path isa Makie.Figure
+        MANTA.forget!(fig_rgb_path)
 
         hpix_ppv_path = joinpath(tmp, "healpix_ppv.fits")
         hpix_ppv = reshape(Float32.(1:48), 12, 4)
         FITS(hpix_ppv_path, "w") do f
             write(f, hpix_ppv)
         end
-        fig_hpix = CartaViewer.carta_healpix_cube(
+        fig_hpix = MANTA.manta_healpix_cube(
             hpix_ppv_path;
             activate_gl = false,
             display_fig = false,
@@ -307,12 +400,12 @@ end
             figsize = (800, 560),
         )
         @test fig_hpix isa Makie.Figure
-        CartaViewer.forget!(fig_hpix)
+        MANTA.forget!(fig_hpix)
 
         hpix_map_path = joinpath(tmp, "healpix_map.fits")
         hpix_map = HealpixMap{Float64,RingOrder,Vector{Float64}}(collect(1.0:12.0))
         Healpix.saveToFITS(hpix_map, hpix_map_path; unit = "K")
-        fig_map = CartaViewer.carta_healpix(
+        fig_map = MANTA.manta_healpix(
             hpix_map_path;
             activate_gl = false,
             display_fig = false,
@@ -322,22 +415,151 @@ end
             figsize = (800, 560),
         )
         @test fig_map isa Makie.Figure
-        CartaViewer.forget!(fig_map)
+        MANTA.forget!(fig_map)
 
         missing = joinpath(tmp, "does_not_exist.fits")
-        @test_throws ArgumentError CartaViewer.carta(missing; activate_gl = false, display_fig = false)
+        @test_throws ArgumentError MANTA.manta(missing; activate_gl = false, display_fig = false)
 
-        bad_path = joinpath(tmp, "cube2d.fits")
-        FITS(bad_path, "w") do f
+        image2d_path = joinpath(tmp, "image2d.fits")
+        FITS(image2d_path, "w") do f
             write(f, reshape(Float32.(1:12), 3, 4))
         end
+        fig_2d = MANTA.manta(
+            image2d_path;
+            activate_gl = false,
+            display_fig = false,
+            save_dir = tmp,
+            figsize = (700, 450),
+        )
+        @test fig_2d isa Makie.Figure
+        MANTA.forget!(fig_2d)
+
+        fig_2d_direct = MANTA.manta(
+            reshape(Float32.(1:12), 3, 4);
+            activate_gl = false,
+            display_fig = false,
+            figsize = (700, 450),
+        )
+        @test fig_2d_direct isa Makie.Figure
+        MANTA.forget!(fig_2d_direct)
+
+        bad_path = joinpath(tmp, "cube4d.fits")
+        FITS(bad_path, "w") do f
+            write(f, reshape(Float32.(1:24), 2, 3, 2, 2))
+        end
         err = try
-            CartaViewer.carta(bad_path; activate_gl = false, display_fig = false)
+            MANTA.manta(bad_path; activate_gl = false, display_fig = false)
             nothing
         catch e
             e
         end
         @test err isa ArgumentError
         @test occursin("Expected a 3D FITS cube", sprint(showerror, err))
+    end
+end
+
+@testset "helpers: power spectrum" begin
+    using FFTW: fft
+
+    # --- Kronecker delta: flat raw |F|² (no window, no demean, no padding).
+    @testset "delta is flat" begin
+        N = 16
+        A = zeros(Float64, N, N)
+        A[N ÷ 2 + 1, N ÷ 2 + 1] = 1.0
+        res = MANTA.power_spectrum_2d(A; window = :none, demean = false, pad_pow2 = false)
+        # All bins identical for a delta input.
+        @test maximum(res.P2d) ≈ minimum(res.P2d) atol = 1e-9
+        # MASTER-light divisor is ⟨1²⟩ = 1 here, so |F|² should be 1 everywhere.
+        @test all(p -> isapprox(p, 1.0; atol = 1e-9), res.P2d)
+        @test res.f_sky == 1.0
+        @test res.window === :none
+        @test !res.padded
+    end
+
+    # --- Pure cosine peaks at the expected radial bin.
+    @testset "sinusoid peaks at expected k" begin
+        N = 64
+        m = 5
+        A = [cos(2π * m * (j - 1) / N) for i in 1:N, j in 1:N]
+        res = MANTA.power_spectrum_2d(A; window = :none, demean = false, pad_pow2 = false)
+        radii, prof = MANTA.power_spectrum_1d_radial(res.P2d)
+        # Peak should be at the bin matching the spatial frequency m.
+        @test argmax(prof) - 1 == m
+        # Other bins (excluding immediate neighbours) are much smaller.
+        peak_val = prof[m + 1]
+        for b in 1:length(prof)
+            (b == m || b == m + 1 || b == m + 2) && continue
+            @test prof[b] < peak_val * 1e-3
+        end
+    end
+
+    # --- Parseval (window=:none, no padding, no demean): sum(|F|²) = N²·sum(|A|²).
+    @testset "parseval no-window no-pad" begin
+        N = 8
+        A = randn(MersenneTwister(0), N, N)
+        res = MANTA.power_spectrum_2d(A; window = :none, demean = false, pad_pow2 = false)
+        # power_spectrum_2d divides by ⟨W²⟩ = 1 here, so it stores |F|² directly.
+        # Parseval for non-unitary FFT used by FFTW: sum(|F|²) = N² · sum(|A|²).
+        @test isapprox(sum(res.P2d), length(A) * sum(abs2, A); rtol = 1e-9)
+    end
+
+    # --- Padding to next power of 2 produces correct effective size.
+    @testset "pad to next pow2" begin
+        A = randn(MersenneTwister(1), 7, 11)
+        res = MANTA.power_spectrum_2d(A; window = :none, demean = false, pad_pow2 = true)
+        @test res.ny_eff == 8 && res.nx_eff == 16
+        @test res.padded
+        @test size(res.P2d) == (8, 16)
+        # Already-pow2 input does not grow.
+        B = randn(MersenneTwister(2), 8, 8)
+        res2 = MANTA.power_spectrum_2d(B; window = :none, demean = false, pad_pow2 = true)
+        @test !res2.padded
+        @test (res2.ny_eff, res2.nx_eff) == (8, 8)
+    end
+
+    # --- NaN apodization runs and reports a coherent f_sky.
+    @testset "NaN apodization" begin
+        N = 32
+        A = randn(MersenneTwister(3), N, N)
+        # Carve a NaN strip on the left.
+        A[:, 1:6] .= NaN
+        res = MANTA.power_spectrum_2d(A; window = :hann,
+                                       apodize_nan = true, nan_taper = 3)
+        @test res.apodized
+        @test isapprox(res.f_sky, (N * (N - 6)) / (N * N); atol = 1e-9)
+        @test all(isfinite, res.P2d)
+        @test res.w_norm > 0
+    end
+
+    # --- Hamming window is applied (different result from :none).
+    @testset "window kinds differ" begin
+        A = randn(MersenneTwister(4), 16, 16)
+        r_none    = MANTA.power_spectrum_2d(A; window = :none, demean = false)
+        r_hann    = MANTA.power_spectrum_2d(A; window = :hann, demean = false)
+        r_hamming = MANTA.power_spectrum_2d(A; window = :hamming, demean = false)
+        @test r_none.P2d != r_hann.P2d
+        @test r_hann.P2d != r_hamming.P2d
+    end
+
+    # --- Log-log slope fit recovers an injected power law.
+    @testset "fit_loglog_slope" begin
+        k = collect(1.0:1.0:50.0)
+        # P = 10 * k^(-2.7)
+        p = 10.0 .* (k .^ -2.7)
+        slope, intercept, n = MANTA.fit_loglog_slope(k, p; kmin = 2.0, kmax = 40.0)
+        @test isapprox(slope, -2.7; atol = 1e-9)
+        @test isapprox(intercept, log10(10.0); atol = 1e-9)
+        @test n == count(ki -> 2.0 <= ki <= 40.0, k)
+
+        # Empty band -> NaN, n = 0.
+        s2, i2, n2 = MANTA.fit_loglog_slope(k, p; kmin = 1e9, kmax = 1e10)
+        @test isnan(s2) && isnan(i2) && n2 == 0
+
+        # Drops non-positive p (log undefined).
+        kn = [1.0, 2.0, 4.0, 8.0]
+        pn = [1.0, 0.0, 0.25, 0.0625]   # zero is dropped
+        s3, _, n3 = MANTA.fit_loglog_slope(kn, pn)
+        @test n3 == 3
+        @test isapprox(s3, -2.0; atol = 1e-9)
     end
 end
