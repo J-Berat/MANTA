@@ -13,6 +13,7 @@ using ColorTypes
 using FITSIO
 using Statistics: mean
 using Healpix
+using Random: MersenneTwister
 
 @testset "helpers: scaling" begin
     A = Float32.([1, 10, 100, 0, -1])
@@ -459,8 +460,6 @@ end
 end
 
 @testset "helpers: power spectrum" begin
-    using FFTW: fft
-
     # --- Kronecker delta: flat raw |F|² (no window, no demean, no padding).
     @testset "delta is flat" begin
         N = 16
