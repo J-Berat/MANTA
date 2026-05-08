@@ -13,7 +13,6 @@ using ColorTypes
 using FITSIO
 using Statistics: mean
 using Healpix
-using Random: MersenneTwister
 
 @testset "helpers: scaling" begin
     A = Float32.([1, 10, 100, 0, -1])
@@ -492,10 +491,18 @@ end
         end
     end
 
+    # Deterministic pseudo-random surface (LCG-shaped sums of trig modes) so the
+    # test suite does not need Random/MersenneTwister as a stdlib dependency.
+    deterministic_field(N::Int, M::Int) = Float64[
+        sin(0.123 * i + 0.371 * j) +
+        0.5 * cos(0.7 * i - 0.3 * j) +
+        0.25 * sin(0.05 * i * j)
+        for i in 1:N, j in 1:M
+    ]
+
     # --- Parseval (window=:none, no padding, no demean): sum(|F|²) = N²·sum(|A|²).
     @testset "parseval no-window no-pad" begin
-        N = 8
-        A = randn(MersenneTwister(0), N, N)
+        A = deterministic_field(8, 8)
         res = MANTA.power_spectrum_2d(A; window = :none, demean = false, pad_pow2 = false)
         # power_spectrum_2d divides by ⟨W²⟩ = 1 here, so it stores |F|² directly.
         # Parseval for non-unitary FFT used by FFTW: sum(|F|²) = N² · sum(|A|²).
@@ -504,13 +511,13 @@ end
 
     # --- Padding to next power of 2 produces correct effective size.
     @testset "pad to next pow2" begin
-        A = randn(MersenneTwister(1), 7, 11)
+        A = deterministic_field(7, 11)
         res = MANTA.power_spectrum_2d(A; window = :none, demean = false, pad_pow2 = true)
         @test res.ny_eff == 8 && res.nx_eff == 16
         @test res.padded
         @test size(res.P2d) == (8, 16)
         # Already-pow2 input does not grow.
-        B = randn(MersenneTwister(2), 8, 8)
+        B = deterministic_field(8, 8)
         res2 = MANTA.power_spectrum_2d(B; window = :none, demean = false, pad_pow2 = true)
         @test !res2.padded
         @test (res2.ny_eff, res2.nx_eff) == (8, 8)
@@ -519,7 +526,7 @@ end
     # --- NaN apodization runs and reports a coherent f_sky.
     @testset "NaN apodization" begin
         N = 32
-        A = randn(MersenneTwister(3), N, N)
+        A = deterministic_field(N, N)
         # Carve a NaN strip on the left.
         A[:, 1:6] .= NaN
         res = MANTA.power_spectrum_2d(A; window = :hann,
@@ -532,7 +539,7 @@ end
 
     # --- Hamming window is applied (different result from :none).
     @testset "window kinds differ" begin
-        A = randn(MersenneTwister(4), 16, 16)
+        A = deterministic_field(16, 16)
         r_none    = MANTA.power_spectrum_2d(A; window = :none, demean = false)
         r_hann    = MANTA.power_spectrum_2d(A; window = :hann, demean = false)
         r_hamming = MANTA.power_spectrum_2d(A; window = :hamming, demean = false)
@@ -556,7 +563,7 @@ end
 
         # Drops non-positive p (log undefined).
         kn = [1.0, 2.0, 4.0, 8.0]
-        pn = [1.0, 0.0, 0.25, 0.0625]   # zero is dropped
+        pn = [1.0, 0.0, 1 / 16, 1 / 64]   # zero is dropped
         s3, _, n3 = MANTA.fit_loglog_slope(kn, pn)
         @test n3 == 3
         @test isapprox(s3, -2.0; atol = 1e-9)

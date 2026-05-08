@@ -863,7 +863,7 @@ function manta(
     loop_chk.checked[] = true
     main_grid[3, 2] = Label(
         main_grid[3, 2];
-        text      = "↔ arrows · move crosshair    ◻ left-click · pick / draw region    🔍 right-drag · zoom    i · invert colormap",
+        text      = "arrows: move crosshair    left-click: pick / draw region    right-drag: zoom    i: invert colormap",
         halign    = :right,
         fontsize  = 13,
         color     = ui_text_muted,
