@@ -822,18 +822,19 @@ function _view_healpix_cube(
     hist_bins_box = Textbox(ctrl[6,3]; placeholder="bins", width=80, height=30)
     hist_xmin_box = Textbox(ctrl[6,4]; placeholder="x min", width=100, height=30)
     hist_xmax_box = Textbox(ctrl[6,5]; placeholder="x max", width=100, height=30)
-    hist_apply_btn = Button(ctrl[6,6]; label="Apply", width=80, height=30)
+    hist_apply_btn = Button(ctrl[6,6]; label="Apply x", width=88, height=30)
     hist_auto_btn = Button(ctrl[6,7]; label="Auto x", width=82, height=30)
     hist_ymin_box = Textbox(ctrl[6,8]; placeholder="y min", width=100, height=30)
     hist_ymax_box = Textbox(ctrl[6,9]; placeholder="y max", width=100, height=30)
-    hist_y_auto_btn = Button(ctrl[6,10]; label="Auto y", width=82, height=30)
+    hist_y_apply_btn = Button(ctrl[6,10]; label="Apply y", width=88, height=30)
+    hist_y_auto_btn = Button(ctrl[6,11]; label="Auto y", width=82, height=30)
     Label(ctrl[7,1], text=L"\text{Spectrum y}", halign=:left, tellwidth=false, fontsize=15)
     spec_ymin_box = Textbox(ctrl[7,2]; placeholder="y min", width=100, height=30)
     spec_ymax_box = Textbox(ctrl[7,3]; placeholder="y max", width=100, height=30)
-    spec_y_apply_btn = Button(ctrl[7,4]; label="Apply", width=80, height=30)
+    spec_y_apply_btn = Button(ctrl[7,4]; label="Apply y", width=88, height=30)
     spec_y_auto_btn = Button(ctrl[7,5]; label="Auto y", width=82, height=30)
     foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, cmap_menu, region_mode_menu, moment_menu, hist_mode_menu))
-    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, reset_btn, save_btn, region_clear_btn, contour_apply_btn, show_moment_btn, show_channel_btn, save_moment_fits_btn, hist_apply_btn, hist_auto_btn, hist_y_auto_btn, spec_y_apply_btn, spec_y_auto_btn))
+    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, reset_btn, save_btn, region_clear_btn, contour_apply_btn, show_moment_btn, show_channel_btn, save_moment_fits_btn, hist_apply_btn, hist_auto_btn, hist_y_apply_btn, hist_y_auto_btn, spec_y_apply_btn, spec_y_auto_btn))
     foreach(w -> manta_style_checkbox!(w, ui_theme), (invert_chk, graticule_chk, gauss_chk, contour_chk))
     foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box, hist_ymin_box, hist_ymax_box, spec_ymin_box, spec_ymax_box))
     foreach(w -> manta_style_slider!(w, ui_theme), (chan_slider, sigma_slider))
@@ -991,22 +992,13 @@ function _view_healpix_cube(
             get_box_str(hist_xmax_box);
             fallback = hist_xlimits_manual_value[],
         )
-        ok_y, manual_y, ylim, _y_msg = parse_histogram_ylimits(
-            get_box_str(hist_ymin_box),
-            get_box_str(hist_ymax_box);
-            fallback = hist_ylimits_manual_value[],
-        )
-        ok_bins && ok_x && ok_y || return
+        ok_bins && ok_x || return
         hist_bins_obs[] = bins
         hist_xlimits_manual_value[] = xlim
         hist_xlimits_manual[] = manual_x
-        hist_ylimits_manual_value[] = ylim
-        hist_ylimits_manual[] = manual_y
         set_box_text!(hist_bins_box, string(bins))
         set_box_text!(hist_xmin_box, manual_x ? string(first(xlim)) : "")
         set_box_text!(hist_xmax_box, manual_x ? string(last(xlim)) : "")
-        set_box_text!(hist_ymin_box, manual_y ? string(first(ylim)) : "")
-        set_box_text!(hist_ymax_box, manual_y ? string(last(ylim)) : "")
         _refresh_hist_axes!()
     end
     on(hist_auto_btn.clicks) do _
@@ -1019,6 +1011,19 @@ function _view_healpix_cube(
         hist_ylimits_manual[] = false
         set_box_text!(hist_ymin_box, "")
         set_box_text!(hist_ymax_box, "")
+        _refresh_hist_axes!()
+    end
+    on(hist_y_apply_btn.clicks) do _
+        ok_y, manual_y, ylim, _msg = parse_histogram_ylimits(
+            get_box_str(hist_ymin_box),
+            get_box_str(hist_ymax_box);
+            fallback = hist_ylimits_manual_value[],
+        )
+        ok_y || return
+        hist_ylimits_manual_value[] = ylim
+        hist_ylimits_manual[] = manual_y
+        set_box_text!(hist_ymin_box, manual_y ? string(first(ylim)) : "")
+        set_box_text!(hist_ymax_box, manual_y ? string(last(ylim)) : "")
         _refresh_hist_axes!()
     end
     on(spec_y_apply_btn.clicks) do _

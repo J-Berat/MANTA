@@ -604,7 +604,11 @@ function _view_cube(
     compact_layout && rowsize!(main_grid, 1, Fixed(plot_row_height))
 
     function control_card!(parent, row, col, title::AbstractString; rows::Int = 4, cols::Int = 4)
-        card = parent[row, col] = GridLayout(; alignmode = Outside(card_pad))
+        card = parent[row, col] = GridLayout(;
+            alignmode = Outside(card_pad),
+            tellwidth = false,
+            tellheight = false,
+        )
         body_rows = rows + 1
         # Card body
         Box(card[1:body_rows, 1:cols];
@@ -703,34 +707,34 @@ function _view_cube(
     region_count_label = Label(region_card[2, 3:4]; text = "0 px", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
     spec_ymin_box = Textbox(region_card[3, 1]; placeholder = "y min", width = 92, height = 32)
     spec_ymax_box = Textbox(region_card[3, 2]; placeholder = "y max", width = 92, height = 32)
-    spec_y_apply_btn = Button(region_card[3, 3]; label = "Apply", width = 82, height = 32)
+    spec_y_apply_btn = Button(region_card[3, 3]; label = "Apply y", width = 82, height = 32)
     spec_y_auto_btn = Button(region_card[3, 4]; label = "Auto y", width = 82, height = 32)
     foreach(c -> colsize!(region_card, c, Auto()), 1:4)
 
     contour_card = control_card!(controls_grid, 2, 3, "Contours"; rows = 3, cols = 5)
     contour_chk = Checkbox(contour_card[2, 1])
     Label(contour_card[2, 2]; text = "Show", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
-    contour_levels_box = Textbox(contour_card[2, 3:4]; placeholder = "auto or 1:red, 2:#00ffaa", width = 190, height = 32)
+    contour_levels_box = Textbox(contour_card[2, 3:4]; placeholder = "auto or 1:red, 2:#00ffaa", width = compact_layout ? 170 : 190, height = 32)
     contour_apply_btn = Button(contour_card[2, 5]; label = "Apply", width = 82, height = 32)
     foreach(c -> colsize!(contour_card, c, Auto()), 1:5)
 
     # Bottom row of Analysis mode: Products + Histogram, centered in a sub-grid.
-    # Layout target: 1/6 spacer | 1/3 Products | 1/3 Histogram | 1/6 spacer →
-    # the pair stays centered under the trio of the row above. colsize! must be
-    # applied *after* every column has at least one child (see below).
+    # The middle spacer prevents the two cards from touching when fixed-width
+    # controls inside either card reach the edge of their cell.
     analysis_bottom = controls_grid[3, 1:3] = GridLayout(; alignmode = Outside(0))
     colgap!(analysis_bottom, controls_gap)
 
-    hist_card = control_card!(analysis_bottom, 1, 3, "Histogram"; rows = 5, cols = 5)
+    hist_card = control_card!(analysis_bottom, 1, 4, "Histogram"; rows = 5, cols = 5)
     hist_mode_menu = Menu(hist_card[2, 1]; options = ["bars", "kde"], prompt = String(hist_mode_obs[]), width = 96)
     hist_bins_box = Textbox(hist_card[2, 2]; placeholder = "bins", width = 76, height = 32)
-    hist_apply_btn = Button(hist_card[2, 3]; label = "Apply", width = 82, height = 32)
-    hist_auto_btn = Button(hist_card[2, 4]; label = "Auto x", width = 82, height = 32)
-    hist_xmin_box = Textbox(hist_card[3, 1:2]; placeholder = "x min", width = 140, height = 32)
-    hist_xmax_box = Textbox(hist_card[3, 3:4]; placeholder = "x max", width = 140, height = 32)
-    hist_ymin_box = Textbox(hist_card[4, 1:2]; placeholder = "y min", width = 140, height = 32)
-    hist_ymax_box = Textbox(hist_card[4, 3:4]; placeholder = "y max", width = 140, height = 32)
-    hist_y_auto_btn = Button(hist_card[4, 5]; label = "Auto y", width = 82, height = 32)
+    hist_apply_btn = Button(hist_card[3, 3]; label = "Apply x", width = 82, height = 32)
+    hist_auto_btn = Button(hist_card[3, 4]; label = "Auto x", width = 82, height = 32)
+    hist_xmin_box = Textbox(hist_card[3, 1]; placeholder = "x min", width = 92, height = 32)
+    hist_xmax_box = Textbox(hist_card[3, 2]; placeholder = "x max", width = 92, height = 32)
+    hist_ymin_box = Textbox(hist_card[4, 1]; placeholder = "y min", width = 92, height = 32)
+    hist_ymax_box = Textbox(hist_card[4, 2]; placeholder = "y max", width = 92, height = 32)
+    hist_y_apply_btn = Button(hist_card[4, 3]; label = "Apply y", width = 82, height = 32)
+    hist_y_auto_btn = Button(hist_card[4, 4]; label = "Auto y", width = 82, height = 32)
     foreach(c -> colsize!(hist_card, c, Auto()), 1:5)
 
     anim_card = control_card!(controls_grid, 2, 3, "Animation"; rows = 4, cols = 5)
@@ -755,24 +759,25 @@ function _view_cube(
     foreach(c -> colsize!(display_card, c, Auto()), 1:4)
 
     moment_card = control_card!(analysis_bottom, 1, 2, "Products"; rows = 4, cols = 5)
-    moment_menu = Menu(moment_card[2, 1]; options = ["M0 integrated", "M1 mean", "M2 dispersion"], prompt = "M0 integrated", width = 138)
-    btn_show_moment = Button(moment_card[2, 2]; label = "Show", width = 82, height = 32)
-    btn_show_slice = Button(moment_card[2, 3]; label = "Slice", width = 82, height = 32)
-    btn_moment_png = Button(moment_card[2, 4]; label = "PNG", width = 74, height = 32)
-    btn_moment_fits = Button(moment_card[2, 5]; label = "FITS", width = 74, height = 32)
-    fits_product_menu = Menu(moment_card[3, 1:2]; options = ["slice", "region", "moment", "filtered cube"], prompt = "slice", width = 150)
-    btn_save_fits = Button(moment_card[3, 3]; label = "Export FITS", width = 118, height = 32)
+    moment_menu = Menu(moment_card[2, 1]; options = ["M0 integrated", "M1 mean", "M2 dispersion"], prompt = "M0 integrated", width = compact_layout ? 124 : 138)
+    btn_show_moment = Button(moment_card[2, 2]; label = "Show", width = compact_layout ? 72 : 82, height = 32)
+    btn_show_slice = Button(moment_card[2, 3]; label = "Slice", width = compact_layout ? 72 : 82, height = 32)
+    btn_moment_png = Button(moment_card[2, 4]; label = "PNG", width = compact_layout ? 64 : 74, height = 32)
+    btn_moment_fits = Button(moment_card[2, 5]; label = "FITS", width = compact_layout ? 64 : 74, height = 32)
+    fits_product_menu = Menu(moment_card[3, 1:2]; options = ["slice", "region", "moment", "filtered cube"], prompt = "slice", width = compact_layout ? 136 : 150)
+    btn_save_fits = Button(moment_card[3, 3]; label = "Export FITS", width = compact_layout ? 104 : 118, height = 32)
     foreach(c -> colsize!(moment_card, c, Auto()), 1:5)
 
-    # Finalise analysis_bottom: transparent Boxes force cols 1 and 4 to exist
-    # so colsize! can address them. Cards live in cols 2 (Products) and 3
-    # (Histogram); cols 1 and 4 act as 1/6 spacers centering the pair.
+    # Finalise analysis_bottom: transparent Boxes force spacer columns to exist
+    # so colsize! can address them. Cards live in cols 2 and 4.
     Box(analysis_bottom[1, 1]; color = :transparent, strokewidth = 0)
-    Box(analysis_bottom[1, 4]; color = :transparent, strokewidth = 0)
-    colsize!(analysis_bottom, 1, Relative(1 / 6))
-    colsize!(analysis_bottom, 2, Relative(1 / 3))
-    colsize!(analysis_bottom, 3, Relative(1 / 3))
-    colsize!(analysis_bottom, 4, Relative(1 / 6))
+    Box(analysis_bottom[1, 3]; color = :transparent, strokewidth = 0)
+    Box(analysis_bottom[1, 5]; color = :transparent, strokewidth = 0)
+    colsize!(analysis_bottom, 1, Relative(1))
+    colsize!(analysis_bottom, 2, Fixed(compact_layout ? 460 : 520))
+    colsize!(analysis_bottom, 3, Fixed(compact_layout ? 28 : 36))
+    colsize!(analysis_bottom, 4, Fixed(compact_layout ? 430 : 500))
+    colsize!(analysis_bottom, 5, Relative(1))
 
     foreach(c -> colsize!(controls_grid, c, Relative(1 / 3)), 1:3)
     rowsize!(controls_grid, 1, Fixed(controls_row_heights[1]))
@@ -850,6 +855,7 @@ function _view_cube(
     style_textbox!(hist_ymax_box)
     style_button!(hist_apply_btn)
     style_button!(hist_auto_btn)
+    style_button!(hist_y_apply_btn)
     style_button!(hist_y_auto_btn)
     style_button!(btn_show_moment)
     style_button!(btn_show_slice)
@@ -865,7 +871,7 @@ function _view_cube(
                     btn_save_img, btn_save_spec, btn_save_state, btn_load_state,
                     btn_show_compare, btn_load_compare, play_btn, anim_btn, clim_apply_btn,
                     clim_auto_btn, clim_p1_btn, clim_p5_btn, region_clear_btn, contour_apply_btn,
-                    spec_y_apply_btn, spec_y_auto_btn, hist_apply_btn, hist_auto_btn, hist_y_auto_btn,
+                    spec_y_apply_btn, spec_y_auto_btn, hist_apply_btn, hist_auto_btn, hist_y_apply_btn, hist_y_auto_btn,
                     btn_show_moment, btn_show_slice, btn_moment_png, btn_moment_fits, btn_save_fits)
             btn.height[] = 30
             btn.fontsize[] = 13
@@ -1345,11 +1351,6 @@ function _view_cube(
             get_box_str(hist_xmax_box);
             fallback = hist_xlimits_manual_value[],
         )
-        ok_y, manual_y, ylim, y_msg = parse_histogram_ylimits(
-            get_box_str(hist_ymin_box),
-            get_box_str(hist_ymax_box);
-            fallback = hist_ylimits_manual_value[],
-        )
         if !ok_bins
             set_status!(bins_msg)
             return
@@ -1358,15 +1359,9 @@ function _view_cube(
             set_status!(x_msg)
             return
         end
-        if !ok_y
-            set_status!(y_msg)
-            return
-        end
         hist_bins_obs[] = bins
         hist_xlimits_manual_value[] = xlim
         hist_xlimits_manual[] = manual_x
-        hist_ylimits_manual_value[] = ylim
-        hist_ylimits_manual[] = manual_y
         set_box_text!(hist_bins_box, string(bins))
         if manual_x
             set_box_text!(hist_xmin_box, string(first(xlim)))
@@ -1375,15 +1370,8 @@ function _view_cube(
             set_box_text!(hist_xmin_box, "")
             set_box_text!(hist_xmax_box, "")
         end
-        if manual_y
-            set_box_text!(hist_ymin_box, string(first(ylim)))
-            set_box_text!(hist_ymax_box, string(last(ylim)))
-        else
-            set_box_text!(hist_ymin_box, "")
-            set_box_text!(hist_ymax_box, "")
-        end
         refresh_hist_axes!()
-        set_status!("$(bins_msg) $(x_msg) $(y_msg)")
+        set_status!("$(bins_msg) $(x_msg)")
     end
 
     on(hist_auto_btn.clicks) do _
@@ -1399,6 +1387,26 @@ function _view_cube(
         set_box_text!(hist_ymax_box, "")
         refresh_hist_axes!()
         set_status!("Automatic histogram y-axis enabled.")
+    end
+
+    on(hist_y_apply_btn.clicks) do _
+        ok_y, manual_y, ylim, y_msg = parse_histogram_ylimits(
+            get_box_str(hist_ymin_box),
+            get_box_str(hist_ymax_box);
+            fallback = hist_ylimits_manual_value[],
+        )
+        set_status!(y_msg)
+        ok_y || return
+        hist_ylimits_manual_value[] = ylim
+        hist_ylimits_manual[] = manual_y
+        if manual_y
+            set_box_text!(hist_ymin_box, string(first(ylim)))
+            set_box_text!(hist_ymax_box, string(last(ylim)))
+        else
+            set_box_text!(hist_ymin_box, "")
+            set_box_text!(hist_ymax_box, "")
+        end
+        refresh_hist_axes!()
     end
 
     on(spec_y_apply_btn.clicks) do _

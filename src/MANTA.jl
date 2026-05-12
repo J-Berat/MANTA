@@ -290,15 +290,16 @@ function manta(
     hist_bins_box = Textbox(ctrl[3, 3]; placeholder = "bins", width = 82, height = 32)
     hist_xmin_box = Textbox(ctrl[3, 4]; placeholder = "x min", width = 100, height = 32)
     hist_xmax_box = Textbox(ctrl[3, 5]; placeholder = "x max", width = 100, height = 32)
-    hist_apply_btn = Button(ctrl[3, 6]; label = "Apply", width = 82, height = 32)
+    hist_apply_btn = Button(ctrl[3, 6]; label = "Apply x", width = 82, height = 32)
     hist_auto_btn = Button(ctrl[3, 7]; label = "Auto x", width = 82, height = 32)
     hist_ymin_box = Textbox(ctrl[4, 4]; placeholder = "y min", width = 100, height = 32)
     hist_ymax_box = Textbox(ctrl[4, 5]; placeholder = "y max", width = 100, height = 32)
+    hist_y_apply_btn = Button(ctrl[4, 6]; label = "Apply y", width = 82, height = 32)
     hist_y_auto_btn = Button(ctrl[4, 7]; label = "Auto y", width = 82, height = 32)
     ui_status = Observable(" ")
     grid[4, 1] = Label(grid[4, 1]; text = ui_status, halign = :left, tellwidth = false)
 
-    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, save_btn, hist_apply_btn, hist_auto_btn, hist_y_auto_btn))
+    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, save_btn, hist_apply_btn, hist_auto_btn, hist_y_apply_btn, hist_y_auto_btn))
     foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, cmap_menu, hist_mode_menu))
     foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, hist_bins_box, hist_xmin_box, hist_xmax_box, hist_ymin_box, hist_ymax_box))
     manta_style_checkbox!(invert_chk, ui_theme)
@@ -398,11 +399,6 @@ function manta(
             get_box_str(hist_xmax_box);
             fallback = hist_xlimits_manual_value[],
         )
-        ok_y, manual_y, ylim, y_msg = parse_histogram_ylimits(
-            get_box_str(hist_ymin_box),
-            get_box_str(hist_ymax_box);
-            fallback = hist_ylimits_manual_value[],
-        )
         if !ok_bins
             set_status!(bins_msg)
             return
@@ -411,15 +407,9 @@ function manta(
             set_status!(x_msg)
             return
         end
-        if !ok_y
-            set_status!(y_msg)
-            return
-        end
         hist_bins_obs[] = bins
         hist_xlimits_manual_value[] = xlim
         hist_xlimits_manual[] = manual_x
-        hist_ylimits_manual_value[] = ylim
-        hist_ylimits_manual[] = manual_y
         set_box_text!(hist_bins_box, string(bins))
         if manual_x
             set_box_text!(hist_xmin_box, string(first(xlim)))
@@ -428,15 +418,8 @@ function manta(
             set_box_text!(hist_xmin_box, "")
             set_box_text!(hist_xmax_box, "")
         end
-        if manual_y
-            set_box_text!(hist_ymin_box, string(first(ylim)))
-            set_box_text!(hist_ymax_box, string(last(ylim)))
-        else
-            set_box_text!(hist_ymin_box, "")
-            set_box_text!(hist_ymax_box, "")
-        end
         refresh_hist_axes!()
-        set_status!("$(bins_msg) $(x_msg) $(y_msg)")
+        set_status!("$(bins_msg) $(x_msg)")
     end
     on(hist_auto_btn.clicks) do _
         hist_xlimits_manual[] = false
@@ -451,6 +434,25 @@ function manta(
         set_box_text!(hist_ymax_box, "")
         refresh_hist_axes!()
         set_status!("Automatic histogram y-axis enabled.")
+    end
+    on(hist_y_apply_btn.clicks) do _
+        ok_y, manual_y, ylim, y_msg = parse_histogram_ylimits(
+            get_box_str(hist_ymin_box),
+            get_box_str(hist_ymax_box);
+            fallback = hist_ylimits_manual_value[],
+        )
+        set_status!(y_msg)
+        ok_y || return
+        hist_ylimits_manual_value[] = ylim
+        hist_ylimits_manual[] = manual_y
+        if manual_y
+            set_box_text!(hist_ymin_box, string(first(ylim)))
+            set_box_text!(hist_ymax_box, string(last(ylim)))
+        else
+            set_box_text!(hist_ymin_box, "")
+            set_box_text!(hist_ymax_box, "")
+        end
+        refresh_hist_axes!()
     end
     on(hist_limits_obs) do _
         refresh_hist_axes!()
