@@ -76,7 +76,7 @@ HEALPix-only kwargs:
 - `scale` : `:lin | :log10 | :ln` (default `:lin`).
 
 Notes:
-- Manual color limits when `vmin` & `vmax` set (also sync spectrum Y for
+- Manual contrast limits when `vmin` & `vmax` set (also sync spectrum Y for
   cubes).
 - Window sized by explicit `figsize=(w,h)` or a fallback default.
 - Export directory configurable via `save_dir`; defaults to your Desktop
@@ -105,7 +105,9 @@ function manta(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     # HEALPix PPV cube (npix×nv) — axe vitesse pour le spectre
+    spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     v0::Real = 0.0,
     dv::Real = 1.0,
     vunit::AbstractString = "km/s",
@@ -116,14 +118,17 @@ function manta(
         return manta(ds;
             cmap = cmap === :viridis ? :inferno : cmap,
             vmin = vmin, vmax = vmax, invert = invert, scale = scale,
-            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            hist_mode = hist_mode, hist_bins = hist_bins,
+            hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
             nx = nx, ny = ny, figsize = figsize, save_dir = save_dir,
             activate_gl = activate_gl, display_fig = display_fig)
     elseif ds isa HealpixCubeDataset
         return manta(ds;
             cmap = cmap === :viridis ? :inferno : cmap,
             vmin = vmin, vmax = vmax, invert = invert, scale = scale,
-            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            hist_mode = hist_mode, hist_bins = hist_bins,
+            hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
+            spec_ylimits = spec_ylimits,
             nx = nx, ny = ny, figsize = figsize, save_dir = save_dir,
             activate_gl = activate_gl, display_fig = display_fig,
             rgb = rgb)
@@ -133,12 +138,15 @@ function manta(
             figsize = figsize, save_dir = save_dir,
             activate_gl = activate_gl, display_fig = display_fig,
             settings_path = settings_path,
-            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            hist_mode = hist_mode, hist_bins = hist_bins,
+            hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
+            spec_ylimits = spec_ylimits,
             rgb = rgb)
     elseif ds isa ImageDataset
         return manta(ds;
             cmap = cmap, vmin = vmin, vmax = vmax, invert = invert,
-            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            hist_mode = hist_mode, hist_bins = hist_bins,
+            hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
             scale = scale, figsize = figsize, save_dir = save_dir,
             activate_gl = activate_gl, display_fig = display_fig)
     else
@@ -157,6 +165,7 @@ function manta(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
     save_dir::Union{Nothing,AbstractString} = nothing,
     activate_gl::Bool = true,
@@ -204,6 +213,10 @@ function manta(
     hist_xlimits_manual_value = Observable(hist_xlimits === nothing ?
         (0f0, 1f0) :
         parse_histogram_xlimits(string(first(hist_xlimits)), string(last(hist_xlimits)))[3])
+    hist_ylimits_manual = Observable(hist_ylimits !== nothing)
+    hist_ylimits_manual_value = Observable(hist_ylimits === nothing ?
+        (0f0, 1f0) :
+        parse_histogram_ylimits(string(first(hist_ylimits)), string(last(hist_ylimits)))[3])
     hist_limits_obs = lift(hist_xlimits_manual, hist_xlimits_manual_value, clims_safe) do manual, xlim, clim
         manual ? xlim : clim
     end
@@ -217,7 +230,8 @@ function manta(
     hist_kde_visible = lift(m -> m === :kde, hist_mode_obs)
     hist_ylabel_obs = lift(histogram_ylabel, hist_mode_obs)
 
-    fig_bg_panels = RGBf(0.97, 0.975, 0.985)
+    ui_theme = default_ui_theme()
+    fig_bg_panels = ui_theme.background
     activate_gl ? GLMakie.activate!() : CairoMakie.activate!()
     fig = Figure(size = _pick_fig_size(figsize), backgroundcolor = fig_bg_panels)
     grid = fig[1, 1] = GridLayout()
@@ -242,16 +256,8 @@ function manta(
         valign = :center,
     )
 
-    # Aligned with the modern indigo palette of `manta`
-    ui_accent         = RGBf(0.36, 0.39, 0.92)
-    ui_accent_dim     = RGBf(0.62, 0.64, 0.96)
-    ui_accent_strong  = RGBf(0.28, 0.31, 0.82)
-    ui_border         = RGBf(0.78, 0.81, 0.88)
-    ui_surface        = RGBf(0.985, 0.988, 0.996)
-    ui_surface_hover  = RGBf(0.94, 0.95, 0.99)
-    ui_surface_active = RGBf(0.90, 0.92, 0.98)
-    ui_text           = RGBf(0.10, 0.12, 0.20)
-    ui_text_muted     = RGBf(0.42, 0.46, 0.56)
+    ui_accent = ui_theme.accent
+    ui_text_muted = ui_theme.text_muted
 
     ax_hist = Axis(
         grid[2, 1];
@@ -267,42 +273,37 @@ function manta(
     ctrl = grid[3, 1] = GridLayout(; alignmode = Outside())
     Label(ctrl[1, 1], text = "Image", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
     scale_menu = Menu(ctrl[1, 2]; options = ["lin", "log10", "ln"], prompt = String(scale), width = 96)
-    invert_chk = Checkbox(ctrl[1, 3])
-    Label(ctrl[1, 4], text = "Invert", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
-    clim_min_box = Textbox(ctrl[1, 5]; placeholder = "min", width = 110, height = 32)
-    clim_max_box = Textbox(ctrl[1, 6]; placeholder = "max", width = 110, height = 32)
-    apply_btn = Button(ctrl[1, 7]; label = "Apply", width = 82, height = 32)
-    auto_btn = Button(ctrl[1, 8]; label = "Auto", width = 78, height = 32)
-    p1_btn = Button(ctrl[1, 9]; label = "p1-p99", width = 92, height = 32)
-    p5_btn = Button(ctrl[1, 10]; label = "p5-p95", width = 92, height = 32)
-    save_btn = Button(ctrl[1, 11]; label = "Save PNG", width = 108, height = 32)
-    Label(ctrl[2, 1], text = "Histogram", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
-    hist_mode_menu = Menu(ctrl[2, 2]; options = ["bars", "kde"], prompt = String(hist_mode_obs[]), width = 96)
-    hist_bins_box = Textbox(ctrl[2, 3]; placeholder = "bins", width = 82, height = 32)
-    hist_xmin_box = Textbox(ctrl[2, 4]; placeholder = "x min", width = 100, height = 32)
-    hist_xmax_box = Textbox(ctrl[2, 5]; placeholder = "x max", width = 100, height = 32)
-    hist_apply_btn = Button(ctrl[2, 6]; label = "Apply", width = 82, height = 32)
-    hist_auto_btn = Button(ctrl[2, 7]; label = "Auto x", width = 82, height = 32)
+    Label(ctrl[1, 3], text = "Colormap", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
+    cmap_menu = Menu(ctrl[1, 4]; options = ui_colormap_options(), prompt = String(cmap), width = 112)
+    invert_chk = Checkbox(ctrl[1, 5])
+    Label(ctrl[1, 6], text = "Invert", halign = :left, tellwidth = false, fontsize = 14, color = ui_theme.text)
+    Label(ctrl[2, 1], text = "Contrast", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
+    clim_min_box = Textbox(ctrl[2, 2]; placeholder = "min", width = 110, height = 32)
+    clim_max_box = Textbox(ctrl[2, 3]; placeholder = "max", width = 110, height = 32)
+    apply_btn = Button(ctrl[2, 4]; label = "Apply", width = 82, height = 32)
+    auto_btn = Button(ctrl[2, 5]; label = "Auto", width = 78, height = 32)
+    p1_btn = Button(ctrl[2, 6]; label = "p1-p99", width = 92, height = 32)
+    p5_btn = Button(ctrl[2, 7]; label = "p5-p95", width = 92, height = 32)
+    save_btn = Button(ctrl[2, 8]; label = "Save PNG", width = 108, height = 32)
+    Label(ctrl[3, 1], text = "Histogram", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
+    hist_mode_menu = Menu(ctrl[3, 2]; options = ["bars", "kde"], prompt = String(hist_mode_obs[]), width = 96)
+    hist_bins_box = Textbox(ctrl[3, 3]; placeholder = "bins", width = 82, height = 32)
+    hist_xmin_box = Textbox(ctrl[3, 4]; placeholder = "x min", width = 100, height = 32)
+    hist_xmax_box = Textbox(ctrl[3, 5]; placeholder = "x max", width = 100, height = 32)
+    hist_apply_btn = Button(ctrl[3, 6]; label = "Apply", width = 82, height = 32)
+    hist_auto_btn = Button(ctrl[3, 7]; label = "Auto x", width = 82, height = 32)
+    hist_ymin_box = Textbox(ctrl[4, 4]; placeholder = "y min", width = 100, height = 32)
+    hist_ymax_box = Textbox(ctrl[4, 5]; placeholder = "y max", width = 100, height = 32)
+    hist_y_auto_btn = Button(ctrl[4, 7]; label = "Auto y", width = 82, height = 32)
     ui_status = Observable(" ")
     grid[4, 1] = Label(grid[4, 1]; text = ui_status, halign = :left, tellwidth = false)
 
-    style_button_local!(btn) = begin
-        btn.height[] = 34
-        btn.cornerradius[] = 8
-        btn.strokewidth[] = 1.0
-        btn.strokecolor[] = ui_border
-        btn.buttoncolor[] = ui_surface
-        btn.buttoncolor_hover[] = ui_surface_hover
-        btn.buttoncolor_active[] = ui_surface_active
-        btn.labelcolor[] = ui_text
-        btn.labelcolor_hover[] = ui_accent_strong
-        btn.labelcolor_active[] = ui_accent_strong
-        btn.fontsize[] = 14
-        btn.padding[] = (12, 12, 7, 7)
-        btn
-    end
-    foreach(style_button_local!, (apply_btn, auto_btn, p1_btn, p5_btn, save_btn, hist_apply_btn, hist_auto_btn))
+    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, save_btn, hist_apply_btn, hist_auto_btn, hist_y_auto_btn))
+    foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, cmap_menu, hist_mode_menu))
+    foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, hist_bins_box, hist_xmin_box, hist_xmax_box, hist_ymin_box, hist_ymax_box))
+    manta_style_checkbox!(invert_chk, ui_theme)
     invert_chk.checked[] = invert
+    cmap_menu.selection[] = String(cmap_name[])
     set_box_text_local!(tb, s::AbstractString) = begin
         str = String(s)
         tb.displayed_string[] = str
@@ -314,6 +315,11 @@ function manta(
         lo, hi = hist_xlimits_manual_value[]
         set_box_text_local!(hist_xmin_box, string(lo))
         set_box_text_local!(hist_xmax_box, string(hi))
+    end
+    if hist_ylimits_manual[]
+        lo, hi = hist_ylimits_manual_value[]
+        set_box_text_local!(hist_ymin_box, string(lo))
+        set_box_text_local!(hist_ymax_box, string(hi))
     end
 
     set_status!(msg::AbstractString) = (ui_status[] = String(msg); nothing)
@@ -329,12 +335,28 @@ function manta(
         use_manual[] = true
         set_box_text!(clim_min_box, string(first(parsed)))
         set_box_text!(clim_max_box, string(last(parsed)))
-        set_status!("Colorbar limits set to p$(lo)-p$(hi).")
+        set_status!("Contrast set to p$(lo)-p$(hi).")
+    end
+
+    function refresh_hist_axes!()
+        xlo, xhi = hist_limits_obs[]
+        if hist_ylimits_manual[]
+            ylo, yhi = hist_ylimits_manual_value[]
+            limits!(ax_hist, Float32(xlo), Float32(xhi), Float32(ylo), Float32(yhi))
+        else
+            autolimits!(ax_hist)
+            xlims!(ax_hist, Float32(xlo), Float32(xhi))
+        end
     end
 
     on(scale_menu.selection) do sel
         sel === nothing && return
         scale_mode[] = Symbol(sel)
+    end
+    on(cmap_menu.selection) do sel
+        sel === nothing && return
+        cmap_name[] = Symbol(sel)
+        set_status!("Colormap set to $(String(sel)).")
     end
     on(invert_chk.checked) do v
         invert_cmap[] = v
@@ -360,7 +382,7 @@ function manta(
         use_manual[] = false
         set_box_text!(clim_min_box, "")
         set_box_text!(clim_max_box, "")
-        set_status!("Automatic color limits enabled.")
+        set_status!("Automatic contrast enabled.")
     end
     on(p1_btn.clicks) do _; apply_percentile_clims!(1, 99); end
     on(p5_btn.clicks) do _; apply_percentile_clims!(5, 95); end
@@ -376,6 +398,11 @@ function manta(
             get_box_str(hist_xmax_box);
             fallback = hist_xlimits_manual_value[],
         )
+        ok_y, manual_y, ylim, y_msg = parse_histogram_ylimits(
+            get_box_str(hist_ymin_box),
+            get_box_str(hist_ymax_box);
+            fallback = hist_ylimits_manual_value[],
+        )
         if !ok_bins
             set_status!(bins_msg)
             return
@@ -384,9 +411,15 @@ function manta(
             set_status!(x_msg)
             return
         end
+        if !ok_y
+            set_status!(y_msg)
+            return
+        end
         hist_bins_obs[] = bins
         hist_xlimits_manual_value[] = xlim
         hist_xlimits_manual[] = manual_x
+        hist_ylimits_manual_value[] = ylim
+        hist_ylimits_manual[] = manual_y
         set_box_text!(hist_bins_box, string(bins))
         if manual_x
             set_box_text!(hist_xmin_box, string(first(xlim)))
@@ -395,16 +428,35 @@ function manta(
             set_box_text!(hist_xmin_box, "")
             set_box_text!(hist_xmax_box, "")
         end
-        set_status!("$(bins_msg) $(x_msg)")
+        if manual_y
+            set_box_text!(hist_ymin_box, string(first(ylim)))
+            set_box_text!(hist_ymax_box, string(last(ylim)))
+        else
+            set_box_text!(hist_ymin_box, "")
+            set_box_text!(hist_ymax_box, "")
+        end
+        refresh_hist_axes!()
+        set_status!("$(bins_msg) $(x_msg) $(y_msg)")
     end
     on(hist_auto_btn.clicks) do _
         hist_xlimits_manual[] = false
         set_box_text!(hist_xmin_box, "")
         set_box_text!(hist_xmax_box, "")
+        refresh_hist_axes!()
         set_status!("Automatic histogram x-axis enabled.")
     end
-    on(hist_limits_obs) do lim
-        xlims!(ax_hist, Float32(first(lim)), Float32(last(lim)))
+    on(hist_y_auto_btn.clicks) do _
+        hist_ylimits_manual[] = false
+        set_box_text!(hist_ymin_box, "")
+        set_box_text!(hist_ymax_box, "")
+        refresh_hist_axes!()
+        set_status!("Automatic histogram y-axis enabled.")
+    end
+    on(hist_limits_obs) do _
+        refresh_hist_axes!()
+    end
+    on(hist_y_obs) do _
+        refresh_hist_axes!()
     end
 
     save_root = if save_dir === nothing
@@ -428,6 +480,7 @@ function manta(
     end
 
     keepalive!(fig)
+    refresh_hist_axes!()
     on(fig.scene.events.window_open) do is_open
         is_open || forget!(fig)
     end
@@ -553,6 +606,8 @@ function manta(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     if rgb
         return manta_healpix(as_rgb_pixels(ds.data);
@@ -566,7 +621,8 @@ function manta(
         save_dir = save_dir, activate_gl = activate_gl,
         display_fig = display_fig,
         hist_mode = hist_mode, hist_bins = hist_bins,
-        hist_xlimits = hist_xlimits)
+        hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
+        spec_ylimits = spec_ylimits)
 end
 
 function manta(
@@ -584,6 +640,8 @@ function manta(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     if rgb
         return manta(as_rgb_image(ds.data);
@@ -598,7 +656,8 @@ function manta(
         activate_gl = activate_gl, display_fig = display_fig,
         settings_path = settings_path,
         hist_mode = hist_mode, hist_bins = hist_bins,
-        hist_xlimits = hist_xlimits)
+        hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
+        spec_ylimits = spec_ylimits)
 end
 
 function manta(ds::VectorDataset; kwargs...)

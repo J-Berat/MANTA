@@ -65,6 +65,10 @@ using Healpix
     @test ok_x && manual_x && xlim == (1f0, 10f0)
     ok_x_auto, manual_x_auto, _, _ = MANTA.parse_histogram_xlimits("", "")
     @test ok_x_auto && !manual_x_auto
+    ok_hy, manual_hy, hylim, _ = MANTA.parse_histogram_ylimits("42", "10")
+    @test ok_hy && manual_hy && hylim == (10f0, 42f0)
+    ok_sy_auto, manual_sy_auto, _, _ = MANTA.parse_spectrum_ylimits("", "")
+    @test ok_sy_auto && !manual_sy_auto
 
     smoothed = MANTA.nan_gaussian_filter(Float32[NaN 1 1; NaN 1 1; NaN NaN NaN], 1.0)
     @test size(smoothed) == (3, 3)
@@ -209,6 +213,10 @@ end
     cm = MANTA.to_cmap(:viridis)
     @test length(cm) > 0
     @test cm[1] isa ColorTypes.Colorant
+    @test MANTA.to_cmap(:gray) == MANTA.to_cmap(:grayC)
+    @test all(name -> length(MANTA.to_cmap(name)) > 0, MANTA.ui_colormap_options())
+    @test MANTA.ui_colormap_options() == collect(MANTA.MANTA_COLORMAP_OPTIONS)
+    @test all(in(MANTA.ui_colormap_options()), ["viridis", "cividis", "magma", "inferno", "plasma", "gray"])
 
     # get_box_str via mock (no Makie Textbox available)
     struct MockTB

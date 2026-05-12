@@ -40,6 +40,8 @@ function _view_cube(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     data = as_float32(ds.data)
     siz  = size(data)
@@ -159,6 +161,9 @@ function _view_cube(
     ui_border = ui_theme.border
     ui_text = ui_theme.text
     ui_text_muted = ui_theme.text_muted
+    ui_selection = ui_theme.selection
+    ui_compare = ui_theme.compare
+    ui_success = ui_theme.success
     fig_bg = ui_theme.background
 
     style_checkbox!(chk) = manta_style_checkbox!(chk, ui_theme; compact = compact_layout)
@@ -287,6 +292,10 @@ function _view_cube(
     hist_xlimits_manual_value = Observable(hist_xlimits === nothing ?
         (0f0, 1f0) :
         parse_histogram_xlimits(string(first(hist_xlimits)), string(last(hist_xlimits)))[3])
+    hist_ylimits_manual = Observable(hist_ylimits !== nothing)
+    hist_ylimits_manual_value = Observable(hist_ylimits === nothing ?
+        (0f0, 1f0) :
+        parse_histogram_ylimits(string(first(hist_ylimits)), string(last(hist_ylimits)))[3])
     hist_limits_obs = lift(hist_xlimits_manual, hist_xlimits_manual_value, clims_safe) do manual, xlim, clim
         manual ? xlim : clim
     end
@@ -331,6 +340,10 @@ function _view_cube(
     spec_y_disp = lift(spec_y_raw, spec_scale_mode) do y, m
         apply_scale(y, m)
     end
+    spec_ylimits_value = Observable(spec_ylimits === nothing ?
+        (use_manual[] ? clims_manual[] : (0f0, 1f0)) :
+        parse_spectrum_ylimits(string(first(spec_ylimits)), string(last(spec_ylimits)))[3])
+    spec_ylimits_source = Observable(spec_ylimits === nothing ? (use_manual[] ? :contrast : :auto) : :manual)
 
     # ---------- Figure & layout ----------
     if activate_gl
@@ -344,11 +357,11 @@ function _view_cube(
     hist_axis_height = compact_layout ? 60 : 105
     ps_header_height = compact_layout ? 0 : 90
     ps_axis_size = compact_layout ? 320 : 520
-    controls_height = compact_layout ? 330 : 380
-    controls_row_heights = compact_layout ? (40, 150, 122) : (44, 184, 124)
+    controls_row_heights = compact_layout ? (42, 212, 164) : (46, 214, 146)
     controls_gap = compact_layout ? 8 : 16
-    card_pad = compact_layout ? 6 : 12
-    card_gap = compact_layout ? 6 : 10
+    controls_height = sum(controls_row_heights) + 2 * controls_gap
+    card_pad = compact_layout ? 9 : 12
+    card_gap = compact_layout ? 7 : 10
     main_row_gap = compact_layout ? 8 : 14
     plot_row_height = compact_layout ? max(320, fig_size[2] - controls_height - 8 * main_row_gap) : 0
 
@@ -357,7 +370,7 @@ function _view_cube(
     main_grid = fig[1, 1] = GridLayout()
     colgap!(main_grid, 18)
     rowgap!(main_grid, main_row_gap)
-    # Image + colorbar
+    # Image + contrast scale
     img_grid  = main_grid[1, 1] = GridLayout()
     colgap!(img_grid, -8)
 
@@ -466,10 +479,10 @@ function _view_cube(
     end
     linesegments!(ax_img, crosshair_segments; color = (:white, 0.9), linewidth = 1.6, linestyle = :dot)
     linesegments!(ax_cmp, crosshair_segments; color = (:white, 0.9), linewidth = 1.6, linestyle = :dot, visible = compare_visible)
-    linesegments!(ax_img, zoom_box_segments; color = (ui_accent, 0.95), linewidth = 2.0, linestyle = :dash)
-    linesegments!(ax_cmp, zoom_box_segments; color = (ui_accent, 0.95), linewidth = 2.0, linestyle = :dash, visible = compare_visible)
-    lines!(ax_img, region_segments; color = (RGBf(1.0, 0.78, 0.18), 0.98), linewidth = 2.4)
-    lines!(ax_cmp, region_segments; color = (RGBf(1.0, 0.78, 0.18), 0.98), linewidth = 2.4, visible = compare_visible)
+    linesegments!(ax_img, zoom_box_segments; color = (ui_selection, 0.95), linewidth = 2.0, linestyle = :dash)
+    linesegments!(ax_cmp, zoom_box_segments; color = (ui_selection, 0.95), linewidth = 2.0, linestyle = :dash, visible = compare_visible)
+    lines!(ax_img, region_segments; color = (ui_selection, 0.98), linewidth = 2.4)
+    lines!(ax_cmp, region_segments; color = (ui_selection, 0.98), linewidth = 2.4, visible = compare_visible)
     marker_points = lift(uv_point, show_marker) do p, enabled
         enabled ? Point2f[p] : Point2f[]
     end
@@ -539,7 +552,7 @@ function _view_cube(
     )
     barplot!(ax_hist, hist_x_obs, hist_y_obs; width = hist_width_obs, color = (ui_accent, 0.44), strokecolor = ui_accent, strokewidth = 0.3, visible = hist_bars_visible)
     lines!(ax_hist, hist_x_obs, hist_y_obs; color = ui_accent, linewidth = 1.8, visible = hist_kde_visible)
-    lines!(ax_hist, compare_hist_x_obs, compare_hist_y_obs; color = RGBf(0.92, 0.42, 0.18), linewidth = 1.6, visible = compare_visible)
+    lines!(ax_hist, compare_hist_x_obs, compare_hist_y_obs; color = ui_compare, linewidth = 1.6, visible = compare_visible)
     vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe); color = (ui_text_muted, 0.65), linewidth = 1.1, linestyle = :dash)
 
     ps_layout = main_grid[1, 2] = GridLayout(;
@@ -592,20 +605,23 @@ function _view_cube(
 
     function control_card!(parent, row, col, title::AbstractString; rows::Int = 4, cols::Int = 4)
         card = parent[row, col] = GridLayout(; alignmode = Outside(card_pad))
+        body_rows = rows + 1
         # Card body
-        Box(card[1:rows, 1:cols];
+        Box(card[1:body_rows, 1:cols];
             color = ui_panel, strokecolor = ui_border,
-            strokewidth = 1.0, cornerradius = 12, z = -6)
+            strokewidth = 1.0, cornerradius = 8, z = -6)
         # Header band (visually distinct title row)
         Box(card[1, 1:cols];
             color = ui_panel_header, strokecolor = (:transparent, 0.0),
-            strokewidth = 0.0, cornerradius = 10, z = -5)
+            strokewidth = 0.0, cornerradius = 8, z = -5)
         Label(card[1, 1:cols];
             text = uppercase(title),
             halign = :left, tellwidth = false,
             fontsize = 13, font = :bold,
             color = ui_accent_strong,
             padding = (10, 10, 6, 6))
+        Box(card[body_rows, 1:cols]; color = :transparent, strokewidth = 0, z = -7)
+        rowsize!(card, body_rows, Fixed(compact_layout ? 10 : 12))
         rowgap!(card, card_gap)
         colgap!(card, card_gap)
         return card
@@ -636,10 +652,24 @@ function _view_cube(
     axis_menu = Menu(slice_card[2, 2]; options = axes_labels, prompt = "dim3 (z)", width = 128)
     status_label = Label(slice_card[2, 3:5]; text = latexstring("\\text{axis } 3,\\, \\text{index } 1"), fontsize = 14, halign = :left, tellwidth = false, color = ui_text)
     control_label!(slice_card, (3, 1), "Index")
-    slice_slider = Slider(slice_card[3, 2:5]; range = 1:siz[3], startvalue = 1, width = 320, height = 26)
-    control_label!(slice_card, (4, 1), "Gaussian")
+    slice_slider = Slider(
+        slice_card[3, 2:4];
+        range = 1:siz[3],
+        startvalue = 1,
+        width = compact_layout ? 220 : 260,
+        height = 26,
+        halign = :left,
+    )
+    control_label!(slice_card, (4, 1), "Smoothing")
     sigma_label = Label(slice_card[4, 2]; text = latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize = 14, halign = :left, tellwidth = false, color = ui_text)
-    sigma_slider = Slider(slice_card[4, 3:5]; range = LinRange(0, 10, 101), startvalue = 1.5, width = 230, height = 26)
+    sigma_slider = Slider(
+        slice_card[4, 3:4];
+        range = LinRange(0, 10, 101),
+        startvalue = 1.5,
+        width = compact_layout ? 150 : 190,
+        height = 26,
+        halign = :left,
+    )
     foreach(c -> colsize!(slice_card, c, Auto()), 1:5)
 
     contrast_card = control_card!(controls_grid, 2, 1, "Contrast"; rows = 4, cols = 5)
@@ -649,11 +679,13 @@ function _view_cube(
     clim_auto_btn  = Button(contrast_card[2, 4]; label = "Auto", width = 78, height = 32)
     clim_p1_btn    = Button(contrast_card[3, 1]; label = "p1-p99", width = 92, height = 32)
     clim_p5_btn    = Button(contrast_card[3, 2]; label = "p5-p95", width = 92, height = 32)
+    reset_zoom_analysis_btn = Button(contrast_card[3, 3:4]; label = "Reset zoom", width = 132, height = 32)
     foreach(c -> colsize!(contrast_card, c, Auto()), 1:5)
 
     output_card = control_card!(controls_grid, 2, 1, "Output"; rows = 5, cols = 5)
     fmt_menu  = Menu(output_card[2, 1]; options = ["png", "pdf"], prompt = "png", width = 90)
     fname_box = Textbox(output_card[2, 2:4]; placeholder = "filename base", width = 220, height = 32)
+    reset_zoom_export_btn = Button(output_card[2, 5]; label = "Reset zoom", width = 132, height = 32)
     btn_save_img  = Button(output_card[3, 1]; label = "Save image", width = 116, height = 32)
     btn_save_spec = Button(output_card[3, 2]; label = "Save spectrum", width = 138, height = 32)
     btn_save_state = Button(output_card[3, 3]; label = "Save state", width = 112, height = 32)
@@ -665,10 +697,14 @@ function _view_cube(
     compare_state_label = Label(output_card[5, 1:5]; text = "Comparison: no cube loaded", halign = :left, tellwidth = false, fontsize = 13, color = ui_text_muted)
     foreach(c -> colsize!(output_card, c, Auto()), 1:5)
 
-    region_card = control_card!(controls_grid, 2, 2, "Region Spectrum"; rows = 3, cols = 4)
+    region_card = control_card!(controls_grid, 2, 2, "Selection Spectrum"; rows = 4, cols = 4)
     region_mode_menu = Menu(region_card[2, 1]; options = ["point", "box", "circle"], prompt = "point", width = 112)
     region_clear_btn = Button(region_card[2, 2]; label = "Clear", width = 92, height = 32)
     region_count_label = Label(region_card[2, 3:4]; text = "0 px", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
+    spec_ymin_box = Textbox(region_card[3, 1]; placeholder = "y min", width = 92, height = 32)
+    spec_ymax_box = Textbox(region_card[3, 2]; placeholder = "y max", width = 92, height = 32)
+    spec_y_apply_btn = Button(region_card[3, 3]; label = "Apply", width = 82, height = 32)
+    spec_y_auto_btn = Button(region_card[3, 4]; label = "Auto y", width = 82, height = 32)
     foreach(c -> colsize!(region_card, c, Auto()), 1:4)
 
     contour_card = control_card!(controls_grid, 2, 3, "Contours"; rows = 3, cols = 5)
@@ -678,13 +714,23 @@ function _view_cube(
     contour_apply_btn = Button(contour_card[2, 5]; label = "Apply", width = 82, height = 32)
     foreach(c -> colsize!(contour_card, c, Auto()), 1:5)
 
-    hist_card = control_card!(controls_grid, 3, 2, "Histogram"; rows = 4, cols = 5)
+    # Bottom row of Analysis mode: Products + Histogram, centered in a sub-grid.
+    # Layout target: 1/6 spacer | 1/3 Products | 1/3 Histogram | 1/6 spacer →
+    # the pair stays centered under the trio of the row above. colsize! must be
+    # applied *after* every column has at least one child (see below).
+    analysis_bottom = controls_grid[3, 1:3] = GridLayout(; alignmode = Outside(0))
+    colgap!(analysis_bottom, controls_gap)
+
+    hist_card = control_card!(analysis_bottom, 1, 3, "Histogram"; rows = 5, cols = 5)
     hist_mode_menu = Menu(hist_card[2, 1]; options = ["bars", "kde"], prompt = String(hist_mode_obs[]), width = 96)
     hist_bins_box = Textbox(hist_card[2, 2]; placeholder = "bins", width = 76, height = 32)
     hist_apply_btn = Button(hist_card[2, 3]; label = "Apply", width = 82, height = 32)
     hist_auto_btn = Button(hist_card[2, 4]; label = "Auto x", width = 82, height = 32)
     hist_xmin_box = Textbox(hist_card[3, 1:2]; placeholder = "x min", width = 140, height = 32)
     hist_xmax_box = Textbox(hist_card[3, 3:4]; placeholder = "x max", width = 140, height = 32)
+    hist_ymin_box = Textbox(hist_card[4, 1:2]; placeholder = "y min", width = 140, height = 32)
+    hist_ymax_box = Textbox(hist_card[4, 3:4]; placeholder = "y max", width = 140, height = 32)
+    hist_y_auto_btn = Button(hist_card[4, 5]; label = "Auto y", width = 82, height = 32)
     foreach(c -> colsize!(hist_card, c, Auto()), 1:5)
 
     anim_card = control_card!(controls_grid, 2, 3, "Animation"; rows = 4, cols = 5)
@@ -698,15 +744,17 @@ function _view_cube(
     foreach(c -> colsize!(anim_card, c, Auto()), 1:5)
 
     display_card = control_card!(controls_grid, 2, 3, "Display"; rows = 5, cols = 4)
-    invert_chk = Checkbox(display_card[2, 1]); Label(display_card[2, 2], text = "Invert", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
-    gauss_chk = Checkbox(display_card[2, 3]); Label(display_card[2, 4], text = "Gaussian", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
-    crosshair_chk = Checkbox(display_card[3, 1]); Label(display_card[3, 2], text = "Crosshair", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
-    marker_chk = Checkbox(display_card[3, 3]); Label(display_card[3, 4], text = "Point", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
-    grid_chk = Checkbox(display_card[4, 1]); Label(display_card[4, 2], text = "Grid", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
-    pingpong_chk = Checkbox(display_card[4, 3]); Label(display_card[4, 4], text = "Ping-pong", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
+    Label(display_card[2, 1], text = "Colormap", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
+    cmap_menu = Menu(display_card[2, 2:4]; options = ui_colormap_options(), prompt = String(cmap), width = 156)
+    invert_chk = Checkbox(display_card[3, 1]); Label(display_card[3, 2], text = "Invert", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
+    gauss_chk = Checkbox(display_card[3, 3]); Label(display_card[3, 4], text = "Smoothing", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
+    crosshair_chk = Checkbox(display_card[4, 1]); Label(display_card[4, 2], text = "Crosshair", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
+    marker_chk = Checkbox(display_card[4, 3]); Label(display_card[4, 4], text = "Selection", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
+    grid_chk = Checkbox(display_card[5, 1]); Label(display_card[5, 2], text = "Grid", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
+    pingpong_chk = Checkbox(display_card[5, 3]); Label(display_card[5, 4], text = "Ping-pong", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
     foreach(c -> colsize!(display_card, c, Auto()), 1:4)
 
-    moment_card = control_card!(controls_grid, 3, 1, "Products"; rows = 4, cols = 5)
+    moment_card = control_card!(analysis_bottom, 1, 2, "Products"; rows = 4, cols = 5)
     moment_menu = Menu(moment_card[2, 1]; options = ["M0 integrated", "M1 mean", "M2 dispersion"], prompt = "M0 integrated", width = 138)
     btn_show_moment = Button(moment_card[2, 2]; label = "Show", width = 82, height = 32)
     btn_show_slice = Button(moment_card[2, 3]; label = "Slice", width = 82, height = 32)
@@ -715,6 +763,16 @@ function _view_cube(
     fits_product_menu = Menu(moment_card[3, 1:2]; options = ["slice", "region", "moment", "filtered cube"], prompt = "slice", width = 150)
     btn_save_fits = Button(moment_card[3, 3]; label = "Export FITS", width = 118, height = 32)
     foreach(c -> colsize!(moment_card, c, Auto()), 1:5)
+
+    # Finalise analysis_bottom: transparent Boxes force cols 1 and 4 to exist
+    # so colsize! can address them. Cards live in cols 2 (Products) and 3
+    # (Histogram); cols 1 and 4 act as 1/6 spacers centering the pair.
+    Box(analysis_bottom[1, 1]; color = :transparent, strokewidth = 0)
+    Box(analysis_bottom[1, 4]; color = :transparent, strokewidth = 0)
+    colsize!(analysis_bottom, 1, Relative(1 / 6))
+    colsize!(analysis_bottom, 2, Relative(1 / 3))
+    colsize!(analysis_bottom, 3, Relative(1 / 3))
+    colsize!(analysis_bottom, 4, Relative(1 / 6))
 
     foreach(c -> colsize!(controls_grid, c, Relative(1 / 3)), 1:3)
     rowsize!(controls_grid, 1, Fixed(controls_row_heights[1]))
@@ -730,6 +788,7 @@ function _view_cube(
     style_checkbox!(grid_chk)
     style_menu!(img_scale_menu)
     style_menu!(spec_scale_menu)
+    style_menu!(cmap_menu)
     style_menu!(ps_mode_menu)
     style_menu!(ps_src_menu)
     style_menu!(ps_win_menu)
@@ -753,6 +812,8 @@ function _view_cube(
     style_button!(mode_analysis_btn)
     style_button!(mode_export_btn)
     style_button!(reset_zoom_btn)
+    style_button!(reset_zoom_analysis_btn)
+    style_button!(reset_zoom_export_btn)
     style_button!(ps_btn)
     style_button!(base_layout_btn)
     style_button!(ps_refresh_btn)
@@ -778,11 +839,18 @@ function _view_cube(
     style_checkbox!(contour_chk)
     style_textbox!(contour_levels_box)
     style_button!(contour_apply_btn)
+    style_textbox!(spec_ymin_box)
+    style_textbox!(spec_ymax_box)
+    style_button!(spec_y_apply_btn)
+    style_button!(spec_y_auto_btn)
     style_textbox!(hist_bins_box)
     style_textbox!(hist_xmin_box)
     style_textbox!(hist_xmax_box)
+    style_textbox!(hist_ymin_box)
+    style_textbox!(hist_ymax_box)
     style_button!(hist_apply_btn)
     style_button!(hist_auto_btn)
+    style_button!(hist_y_auto_btn)
     style_button!(btn_show_moment)
     style_button!(btn_show_slice)
     style_button!(btn_moment_png)
@@ -792,17 +860,18 @@ function _view_cube(
     style_slider!(sigma_slider)
 
     if compact_layout
-        for btn in (reset_zoom_btn, ps_btn, base_layout_btn, ps_refresh_btn, ps_popout_btn,
+        for btn in (reset_zoom_btn, reset_zoom_analysis_btn, reset_zoom_export_btn,
+                    ps_btn, base_layout_btn, ps_refresh_btn, ps_popout_btn,
                     btn_save_img, btn_save_spec, btn_save_state, btn_load_state,
                     btn_show_compare, btn_load_compare, play_btn, anim_btn, clim_apply_btn,
                     clim_auto_btn, clim_p1_btn, clim_p5_btn, region_clear_btn, contour_apply_btn,
-                    hist_apply_btn, hist_auto_btn,
+                    spec_y_apply_btn, spec_y_auto_btn, hist_apply_btn, hist_auto_btn, hist_y_auto_btn,
                     btn_show_moment, btn_show_slice, btn_moment_png, btn_moment_fits, btn_save_fits)
             btn.height[] = 30
             btn.fontsize[] = 13
             btn.padding[] = (9, 9, 5, 5)
         end
-        for menu in (img_scale_menu, spec_scale_menu, ps_mode_menu, ps_src_menu, ps_win_menu,
+        for menu in (img_scale_menu, spec_scale_menu, cmap_menu, ps_mode_menu, ps_src_menu, ps_win_menu,
                      ps_unit_menu, fmt_menu, compare_mode_menu, axis_menu, region_mode_menu, hist_mode_menu,
                      moment_menu, fits_product_menu)
             menu.height[] = 30
@@ -811,7 +880,8 @@ function _view_cube(
             menu.dropdown_arrow_size[] = 10
         end
         for tb in (ps_kmin_box, ps_kmax_box, clim_min_box, clim_max_box, fname_box,
-                   compare_path_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box,
+                   compare_path_box, contour_levels_box, spec_ymin_box, spec_ymax_box,
+                   hist_bins_box, hist_xmin_box, hist_xmax_box, hist_ymin_box, hist_ymax_box,
                    start_box, stop_box, step_box, fps_box)
             tb.height[] = 30
             tb.fontsize[] = 13
@@ -829,6 +899,7 @@ function _view_cube(
     end
 
     invert_chk.checked[] = invert_cmap[]
+    cmap_menu.selection[] = String(cmap_name[])
     gauss_chk.checked[] = gauss_on[]
     crosshair_chk.checked[] = show_crosshair[]
     marker_chk.checked[] = show_marker[]
@@ -867,6 +938,16 @@ function _view_cube(
         lo, hi = hist_xlimits_manual_value[]
         set_box_text!(hist_xmin_box, string(lo))
         set_box_text!(hist_xmax_box, string(hi))
+    end
+    if hist_ylimits_manual[]
+        lo, hi = hist_ylimits_manual_value[]
+        set_box_text!(hist_ymin_box, string(lo))
+        set_box_text!(hist_ymax_box, string(hi))
+    end
+    if spec_ylimits_source[] !== :auto
+        lo, hi = spec_ylimits_value[]
+        set_box_text!(spec_ymin_box, string(lo))
+        set_box_text!(spec_ymax_box, string(hi))
     end
 
     set_block_visible!(block, visible::Bool) = begin
@@ -939,6 +1020,7 @@ function _view_cube(
         btn_load_compare.label[] = "Load cube"
         btn_load_compare.width[] = 104
         compare_state_label.text[] = "Comparison: waiting for cube path"
+        compare_state_label.color[] = ui_text_muted
         set_status!("Enter the second cube FITS path, then click Load cube.")
         nothing
     end
@@ -955,6 +1037,7 @@ function _view_cube(
             btn_show_compare.label[] = "Compare cube..."
             btn_show_compare.width[] = 138
             compare_state_label.text[] = "Comparison: no cube loaded"
+            compare_state_label.color[] = ui_text_muted
         end
         nothing
     end
@@ -1006,6 +1089,7 @@ function _view_cube(
         autolimits!(ax_cmp)
         hide_compare_loader!()
         compare_state_label.text[] = "Comparison: cube loaded ($(compare_name[]))"
+        compare_state_label.color[] = ui_success
         set_status!("Comparison cube loaded: $(cmp_path).")
         return true
     end
@@ -1057,9 +1141,9 @@ function _view_cube(
         region_uvs[] = uv
         region_count_label.text[] = "$(length(uv)) px"
         if isempty(uv)
-            set_status!("Region canceled: draw a larger $(String(region_shape[])).")
+            set_status!("Selection canceled: draw a larger $(String(region_shape[])).")
         else
-            set_status!("Region spectrum averaged over $(length(uv)) pixels.")
+            set_status!("Selection spectrum averaged over $(length(uv)) pixels.")
         end
         nothing
     end
@@ -1070,9 +1154,13 @@ function _view_cube(
         use_manual[] = true
         set_box_text!(clim_min_box, string(first(parsed_clims)))
         set_box_text!(clim_max_box, string(last(parsed_clims)))
-        limits!(ax_spec, nothing, nothing, first(parsed_clims), last(parsed_clims))
-        xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
-        set_status!("Colorbar limits set to p$(lo)-p$(hi).")
+        if spec_ylimits_source[] === :contrast
+            spec_ylimits_value[] = parsed_clims
+            set_box_text!(spec_ymin_box, string(first(parsed_clims)))
+            set_box_text!(spec_ymax_box, string(last(parsed_clims)))
+            refresh_spec_ylim!()
+        end
+        set_status!("Contrast set to p$(lo)-p$(hi).")
         nothing
     end
 
@@ -1089,6 +1177,18 @@ function _view_cube(
     function refresh_labels!()
         lab_info.text[] = selection_info_tex()
         status_label.text[] = latexstring("\\text{axis } $(axis[]),\\, \\text{index } $(idx[])")
+    end
+
+    function refresh_spec_ylim!()
+        x_max = Float32(max(0, length(spec_y_buf) - 1))
+        if spec_ylimits_source[] === :manual || spec_ylimits_source[] === :contrast
+            vmin_, vmax_ = spec_ylimits_value[]
+            limits!(ax_spec, nothing, nothing, vmin_, vmax_)
+            xlims!(ax_spec, 0f0, x_max)
+        else
+            autolimits!(ax_spec)
+            xlims!(ax_spec, 0f0, x_max)
+        end
     end
 
     function refresh_spectrum!()
@@ -1115,13 +1215,17 @@ function _view_cube(
             ax_spec.title[] = L"\text{Spectrum at selected pixel}"
         end
         spec_y_raw[] = spec_y_buf
-        x_max = Float32(max(0, length(spec_y_buf) - 1))
-        if use_manual[]
-            vmin_, vmax_ = clims_manual[]; limits!(ax_spec, nothing, nothing, vmin_, vmax_)
-            xlims!(ax_spec, 0f0, x_max)
+        refresh_spec_ylim!()
+    end
+
+    function refresh_hist_axes!()
+        xlo, xhi = hist_limits_obs[]
+        if hist_ylimits_manual[]
+            ylo, yhi = hist_ylimits_manual_value[]
+            limits!(ax_hist, Float32(xlo), Float32(xhi), Float32(ylo), Float32(yhi))
         else
-            autolimits!(ax_spec)
-            xlims!(ax_spec, 0f0, x_max)
+            autolimits!(ax_hist)
+            xlims!(ax_hist, Float32(xlo), Float32(xhi))
         end
     end
 
@@ -1142,25 +1246,30 @@ function _view_cube(
 
     # ---------- Reactivity ----------
     on(clims_obs) do (cmin, cmax)
-        if use_manual[]
-            limits!(ax_spec, nothing, nothing, cmin, cmax)
+        if spec_ylimits_source[] === :contrast
+            spec_ylimits_value[] = (Float32(cmin), Float32(cmax))
+            refresh_spec_ylim!()
         end
     end
 
     on(spec_scale_mode) do _
-        x_max = Float32(max(0, length(spec_y_buf) - 1))
-        if use_manual[]
-            vmin_, vmax_ = clims_manual[]; limits!(ax_spec, nothing, nothing, vmin_, vmax_)
-            xlims!(ax_spec, 0f0, x_max)
-        else
-            autolimits!(ax_spec)
-            xlims!(ax_spec, 0f0, x_max)
-        end
+        refresh_spec_ylim!()
+    end
+
+    reset_zoom!() = begin
+        autolimits!(ax_img)
+        compare_visible[] && autolimits!(ax_cmp)
+        nothing
     end
 
     on(reset_zoom_btn.clicks) do _
-        autolimits!(ax_img)
-        compare_visible[] && autolimits!(ax_cmp)
+        reset_zoom!()
+    end
+    on(reset_zoom_analysis_btn.clicks) do _
+        reset_zoom!()
+    end
+    on(reset_zoom_export_btn.clicks) do _
+        reset_zoom!()
     end
 
     # ---------- UI callbacks ----------
@@ -1217,6 +1326,12 @@ function _view_cube(
         spec_scale_mode[] = Symbol(sel)
     end
 
+    on(cmap_menu.selection) do sel
+        sel === nothing && return
+        cmap_name[] = Symbol(sel)
+        set_status!("Colormap set to $(String(sel)).")
+    end
+
     on(hist_mode_menu.selection) do sel
         sel === nothing && return
         hist_mode_obs[] = normalize_histogram_mode(sel)
@@ -1230,6 +1345,11 @@ function _view_cube(
             get_box_str(hist_xmax_box);
             fallback = hist_xlimits_manual_value[],
         )
+        ok_y, manual_y, ylim, y_msg = parse_histogram_ylimits(
+            get_box_str(hist_ymin_box),
+            get_box_str(hist_ymax_box);
+            fallback = hist_ylimits_manual_value[],
+        )
         if !ok_bins
             set_status!(bins_msg)
             return
@@ -1238,9 +1358,15 @@ function _view_cube(
             set_status!(x_msg)
             return
         end
+        if !ok_y
+            set_status!(y_msg)
+            return
+        end
         hist_bins_obs[] = bins
         hist_xlimits_manual_value[] = xlim
         hist_xlimits_manual[] = manual_x
+        hist_ylimits_manual_value[] = ylim
+        hist_ylimits_manual[] = manual_y
         set_box_text!(hist_bins_box, string(bins))
         if manual_x
             set_box_text!(hist_xmin_box, string(first(xlim)))
@@ -1249,7 +1375,15 @@ function _view_cube(
             set_box_text!(hist_xmin_box, "")
             set_box_text!(hist_xmax_box, "")
         end
-        set_status!("$(bins_msg) $(x_msg)")
+        if manual_y
+            set_box_text!(hist_ymin_box, string(first(ylim)))
+            set_box_text!(hist_ymax_box, string(last(ylim)))
+        else
+            set_box_text!(hist_ymin_box, "")
+            set_box_text!(hist_ymax_box, "")
+        end
+        refresh_hist_axes!()
+        set_status!("$(bins_msg) $(x_msg) $(y_msg)")
     end
 
     on(hist_auto_btn.clicks) do _
@@ -1259,8 +1393,51 @@ function _view_cube(
         set_status!("Automatic histogram x-axis enabled.")
     end
 
-    on(hist_limits_obs) do lim
-        xlims!(ax_hist, Float32(first(lim)), Float32(last(lim)))
+    on(hist_y_auto_btn.clicks) do _
+        hist_ylimits_manual[] = false
+        set_box_text!(hist_ymin_box, "")
+        set_box_text!(hist_ymax_box, "")
+        refresh_hist_axes!()
+        set_status!("Automatic histogram y-axis enabled.")
+    end
+
+    on(spec_y_apply_btn.clicks) do _
+        ok, manual, ylim, msg = parse_spectrum_ylimits(
+            get_box_str(spec_ymin_box),
+            get_box_str(spec_ymax_box);
+            fallback = spec_ylimits_value[],
+        )
+        set_status!(msg)
+        ok || return
+        if manual
+            spec_ylimits_value[] = ylim
+            spec_ylimits_source[] = :manual
+            set_box_text!(spec_ymin_box, string(first(ylim)))
+            set_box_text!(spec_ymax_box, string(last(ylim)))
+        else
+            spec_ylimits_source[] = :auto
+            set_box_text!(spec_ymin_box, "")
+            set_box_text!(spec_ymax_box, "")
+        end
+        refresh_spec_ylim!()
+    end
+
+    on(spec_y_auto_btn.clicks) do _
+        spec_ylimits_source[] = :auto
+        set_box_text!(spec_ymin_box, "")
+        set_box_text!(spec_ymax_box, "")
+        refresh_spec_ylim!()
+        set_status!("Automatic spectrum y-axis enabled.")
+    end
+
+    on(hist_limits_obs) do _
+        refresh_hist_axes!()
+    end
+    on(hist_y_obs) do _
+        refresh_hist_axes!()
+    end
+    on(compare_hist_y_obs) do _
+        refresh_hist_axes!()
     end
 
     on(invert_chk.checked) do v
@@ -1321,20 +1498,28 @@ function _view_cube(
         ok, new_manual, parsed_clims, msg = parse_manual_clims(txtmin, txtmax; fallback = clims_manual[])
         set_status!(msg)
         if !ok
-            @warn "Could not apply colorbar limits" txtmin txtmax msg
+            @warn "Could not apply contrast limits" txtmin txtmax msg
             return
         end
         if new_manual
             clims_manual[] = parsed_clims
             use_manual[] = true
-            limits!(ax_spec, nothing, nothing, first(parsed_clims), last(parsed_clims))
-            xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
+            if spec_ylimits_source[] === :contrast
+                spec_ylimits_value[] = parsed_clims
+                set_box_text!(spec_ymin_box, string(first(parsed_clims)))
+                set_box_text!(spec_ymax_box, string(last(parsed_clims)))
+            end
+            refresh_spec_ylim!()
             set_box_text!(clim_min_box, string(first(parsed_clims)))
             set_box_text!(clim_max_box, string(last(parsed_clims)))
         else
             use_manual[] = false
-            autolimits!(ax_spec)
-            xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
+            if spec_ylimits_source[] === :contrast
+                spec_ylimits_source[] = :auto
+                set_box_text!(spec_ymin_box, "")
+                set_box_text!(spec_ymax_box, "")
+            end
+            refresh_spec_ylim!()
         end
     end
 
@@ -1342,9 +1527,13 @@ function _view_cube(
         use_manual[] = false
         set_box_text!(clim_min_box, "")
         set_box_text!(clim_max_box, "")
-        autolimits!(ax_spec)
-        xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
-        set_status!("Automatic color limits enabled.")
+        if spec_ylimits_source[] === :contrast
+            spec_ylimits_source[] = :auto
+            set_box_text!(spec_ymin_box, "")
+            set_box_text!(spec_ymax_box, "")
+        end
+        refresh_spec_ylim!()
+        set_status!("Automatic contrast enabled.")
     end
 
     on(clim_p1_btn.clicks) do _
@@ -1375,7 +1564,7 @@ function _view_cube(
         clear_region!()
         refresh_labels!()
         refresh_spectrum!()
-        set_status!("Region cleared; spectrum follows the selected pixel.")
+        set_status!("Selection cleared; spectrum follows the selected pixel.")
     end
 
     on(contour_chk.checked) do v
@@ -1683,7 +1872,7 @@ function _view_cube(
         sub = ps_layout_subimage()
         ny0, nx0 = size(sub)
         if ny0 < 4 || nx0 < 4
-            lab = Label(ps_plot_grid[1, 1]; text = "Region too small for FFT (need ≥ 4×4).", fontsize = 14, color = ui_text)
+            lab = Label(ps_plot_grid[1, 1]; text = "Selection too small for FFT (need ≥ 4×4).", fontsize = 14, color = ui_text)
             push!(ps_layout_blocks, lab)
             ps_layout_status[] = " "
             return
@@ -2013,6 +2202,7 @@ function _view_cube(
     on(btn_save_state.clicks) do _
         try
             save_viewer_settings(resolved_settings_path, current_settings())
+            btn_save_state.labelcolor[] = ui_success
             set_status!("Saved settings to $(resolved_settings_path).")
         catch e
             msg = "Failed to save settings: $(sprint(showerror, e))"
@@ -2049,6 +2239,9 @@ function _view_cube(
             try
                 to_cmap(cmap_val)
                 cmap_name[] = cmap_val
+                if String(cmap_val) in MANTA_COLORMAP_OPTIONS
+                    cmap_menu.selection[] = String(cmap_val)
+                end
             catch
                 @warn "Ignoring invalid colormap in settings" colormap=cmap_val
             end
@@ -2090,7 +2283,8 @@ function _view_cube(
                     set_box_text!(clim_max_box, "")
                     autolimits!(ax_spec)
                     xlims!(ax_spec, 0f0, Float32(max(0, length(spec_y_buf) - 1)))
-                end
+            end
+            btn_load_state.labelcolor[] = ui_success
             set_status!("Loaded settings from $(resolved_settings_path).")
         catch e
             msg = "Failed to load settings: $(sprint(showerror, e))"
@@ -2440,7 +2634,7 @@ function _view_cube(
             sub = ps_subimage()
             ny0, nx0 = size(sub)
             if ny0 < 4 || nx0 < 4
-                lab = Label(plot_grid[1, 1]; text = "Region too small for FFT (need ≥ 4×4).", fontsize = 14)
+                lab = Label(plot_grid[1, 1]; text = "Selection too small for FFT (need ≥ 4×4).", fontsize = 14)
                 push!(ps_blocks, lab)
                 ps_status[] = " "
                 empty!(last_1d_k); empty!(last_1d_p)
@@ -2648,6 +2842,7 @@ function _view_cube(
 
     # ---------- Init ----------
     refresh_all!()
+    refresh_hist_axes!()
     keepalive!(fig)
 
     on(fig.scene.events.window_open) do is_open

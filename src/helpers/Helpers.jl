@@ -31,9 +31,11 @@ export as_float32, parse_path_spec
 export region_uv_indices, mean_region_spectrum
 export dual_view_product, moments, moments_map, moment_map, moment_vectors, filtered_cube_by_slice
 export make_info_tex
+export MANTA_COLORMAP_OPTIONS, ui_colormap_options
 export to_cmap, get_box_str, _pick_fig_size, _axis_render_height
 export latex_safe, make_main_title, make_slice_title, make_spec_title
-export parse_manual_clims, parse_histogram_bins, parse_histogram_xlimits, parse_gif_request
+export parse_manual_clims, parse_histogram_bins, parse_histogram_xlimits
+export parse_histogram_ylimits, parse_spectrum_ylimits, parse_gif_request
 export SimpleWCSAxis, read_simple_wcs, has_wcs, world_coord
 export wcs_axis_label, format_world_coord, data_unit_label
 export save_viewer_settings, load_viewer_settings
@@ -1149,7 +1151,15 @@ end
 
 Resolve to a Makie colormap.
 """
-to_cmap(name::Union{Symbol,String}) = Makie.to_colormap(Symbol(name))
+function to_cmap(name::Union{Symbol,String})
+    cmap_name = Symbol(name)
+    cmap_name = cmap_name in (:gray, :grey) ? :grayC : cmap_name
+    return Makie.to_colormap(cmap_name)
+end
+
+const MANTA_COLORMAP_OPTIONS = ("viridis", "cividis", "magma", "inferno", "plasma", "gray")
+
+ui_colormap_options() = collect(MANTA_COLORMAP_OPTIONS)
 
 """
     get_box_str(textbox) -> String
@@ -1205,7 +1215,7 @@ end
     parse_manual_clims(min_txt, max_txt; fallback=(0f0, 1f0))
       -> (ok, use_manual, clims, message)
 
-Validate and normalize user-provided colorbar limits.
+Validate and normalize user-provided contrast limits.
 """
 function parse_manual_clims(
     min_txt::AbstractString,
@@ -1215,7 +1225,7 @@ function parse_manual_clims(
     smin = strip(String(min_txt))
     smax = strip(String(max_txt))
     if isempty(smin) && isempty(smax)
-        return (true, false, fallback, "Automatic color limits enabled.")
+        return (true, false, fallback, "Automatic contrast enabled.")
     end
     if isempty(smin) ⊻ isempty(smax)
         return (false, false, fallback, "Fill both min and max, or clear both for auto mode.")
@@ -1223,20 +1233,20 @@ function parse_manual_clims(
     vmin = tryparse(Float32, smin)
     vmax = tryparse(Float32, smax)
     if vmin === nothing || vmax === nothing
-        return (false, false, fallback, "Colorbar limits must be valid numbers.")
+        return (false, false, fallback, "Contrast limits must be valid numbers.")
     end
     lo = Float32(vmin)
     hi = Float32(vmax)
     if lo > hi
         lo, hi = hi, lo
-        return (true, true, (lo, hi), "Colorbar limits were swapped because min > max.")
+        return (true, true, (lo, hi), "Contrast limits were swapped because min > max.")
     end
     if lo == hi
         lo = prevfloat(lo)
         hi = nextfloat(hi)
-        return (true, true, (lo, hi), "Expanded equal min/max colorbar limits to avoid zero width.")
+        return (true, true, (lo, hi), "Expanded equal min/max contrast limits to avoid zero width.")
     end
-    return (true, true, (lo, hi), "Manual color limits applied.")
+    return (true, true, (lo, hi), "Manual contrast applied.")
 end
 
 """
@@ -1305,6 +1315,62 @@ function parse_histogram_xlimits(
     end
     return (true, true, (lo, hi), "Manual histogram x-axis applied.")
 end
+
+function _parse_axis_limits(
+    min_txt::AbstractString,
+    max_txt::AbstractString;
+    fallback::Tuple{Float32,Float32} = (0f0, 1f0),
+    axis_name::AbstractString = "axis",
+)
+    smin = strip(String(min_txt))
+    smax = strip(String(max_txt))
+    if isempty(smin) && isempty(smax)
+        return (true, false, fallback, "Automatic $(axis_name) enabled.")
+    end
+    if isempty(smin) ⊻ isempty(smax)
+        return (false, false, fallback, "Fill both $(axis_name) min and max, or clear both for auto mode.")
+    end
+    vmin = tryparse(Float32, smin)
+    vmax = tryparse(Float32, smax)
+    if vmin === nothing || vmax === nothing
+        return (false, false, fallback, "$(axis_name) limits must be valid numbers.")
+    end
+    lo = Float32(vmin)
+    hi = Float32(vmax)
+    if !(isfinite(lo) && isfinite(hi))
+        return (false, false, fallback, "$(axis_name) limits must be finite numbers.")
+    end
+    if lo > hi
+        lo, hi = hi, lo
+        return (true, true, (lo, hi), "$(axis_name) limits were swapped because min > max.")
+    end
+    if lo == hi
+        lo = prevfloat(lo)
+        hi = nextfloat(hi)
+        return (true, true, (lo, hi), "Expanded equal $(axis_name) limits to avoid zero width.")
+    end
+    return (true, true, (lo, hi), "Manual $(axis_name) applied.")
+end
+
+"""
+    parse_histogram_ylimits(min_txt, max_txt; fallback=(0f0, 1f0))
+      -> (ok, use_manual, limits, message)
+
+Validate user-provided histogram y-axis limits. Empty fields restore automatic
+limits.
+"""
+parse_histogram_ylimits(min_txt::AbstractString, max_txt::AbstractString; fallback::Tuple{Float32,Float32} = (0f0, 1f0)) =
+    _parse_axis_limits(min_txt, max_txt; fallback = fallback, axis_name = "histogram y-axis")
+
+"""
+    parse_spectrum_ylimits(min_txt, max_txt; fallback=(0f0, 1f0))
+      -> (ok, use_manual, limits, message)
+
+Validate user-provided spectrum y-axis limits. Empty fields restore automatic
+limits.
+"""
+parse_spectrum_ylimits(min_txt::AbstractString, max_txt::AbstractString; fallback::Tuple{Float32,Float32} = (0f0, 1f0)) =
+    _parse_axis_limits(min_txt, max_txt; fallback = fallback, axis_name = "spectrum y-axis")
 
 """
     parse_gif_request(start_txt, stop_txt, step_txt, fps_txt, amax; pingpong=false)

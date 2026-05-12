@@ -287,7 +287,7 @@ Visualiseur interactif HEALPix en projection Mollweide.
 - **Hover/clic gauche** : affiche `(l, b)` galactiques et la valeur du
   pixel.
 - **Échelle** : `:lin`, `:log10`, `:ln` (sélectionnable au runtime).
-- **Colorbar** : auto (quantiles 2/98 % en lin, 5/98 % en log) ou
+- **Contrast** : auto (quantiles 2/98 % en lin, 5/98 % en log) ou
   `vmin`/`vmax` manuels.
 
 Retourne la `Figure` GLMakie.
@@ -309,6 +309,7 @@ function manta_healpix(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     ds = load_dataset(filepath; column = column)
     ds isa HealpixMapDataset || throw(ArgumentError(
@@ -318,7 +319,8 @@ function manta_healpix(
         scale = scale, nx = nx, ny = ny, figsize = figsize,
         save_dir = save_dir, activate_gl = activate_gl,
         display_fig = display_fig,
-        hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits)
+        hist_mode = hist_mode, hist_bins = hist_bins,
+        hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits)
 end
 
 """
@@ -341,7 +343,7 @@ Contrôles :
   précalculé, pas de recalcul de projection).
 - right-drag → zoom rectangulaire sur la Mollweide.
 - left-click → sélectionne un pixel HEALPix, met à jour le spectre.
-- échelle, colorbar manuelle, invert colormap, save PNG.
+- échelle, contraste manuel, colormap, invert colormap, save PNG.
 
 `v0`, `dv`, `vunit` : axe vitesse `v(j) = v0 + (j-1)*dv` pour le spectre.
 """
@@ -364,6 +366,8 @@ function manta_healpix_cube(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     ds = load_dataset(filepath; v0 = v0, dv = dv, vunit = vunit)
     ds isa HealpixCubeDataset || throw(ArgumentError(
@@ -373,7 +377,9 @@ function manta_healpix_cube(
         scale = scale, nx = nx, ny = ny, figsize = figsize,
         save_dir = save_dir, activate_gl = activate_gl,
         display_fig = display_fig,
-        hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits)
+        hist_mode = hist_mode, hist_bins = hist_bins,
+        hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
+        spec_ylimits = spec_ylimits)
 end
 
 function _view_healpix_cube(
@@ -392,6 +398,8 @@ function _view_healpix_cube(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     cube = as_float32(ds.data)
     nside = ds.nside
@@ -532,6 +540,10 @@ function _view_healpix_cube(
     hist_xlimits_manual_value = Observable(hist_xlimits === nothing ?
         (0f0, 1f0) :
         parse_histogram_xlimits(string(first(hist_xlimits)), string(last(hist_xlimits)))[3])
+    hist_ylimits_manual = Observable(hist_ylimits !== nothing)
+    hist_ylimits_manual_value = Observable(hist_ylimits === nothing ?
+        (0f0, 1f0) :
+        parse_histogram_ylimits(string(first(hist_ylimits)), string(last(hist_ylimits)))[3])
     hist_limits_obs = lift(hist_xlimits_manual, hist_xlimits_manual_value, clims_safe) do manual, xlim, clim
         manual ? xlim : clim
     end
@@ -562,6 +574,10 @@ function _view_healpix_cube(
     sel_label = Observable(latexstring("\\text{click on map to select a pixel}"))
 
     spec_y_obs = Observable(zeros(Float32, nv))
+    spec_ylimits_value = Observable(spec_ylimits === nothing ?
+        (use_manual[] ? clims_manual[] : (0f0, 1f0)) :
+        parse_spectrum_ylimits(string(first(spec_ylimits)), string(last(spec_ylimits)))[3])
+    spec_ylimits_source = Observable(spec_ylimits === nothing ? (use_manual[] ? :contrast : :auto) : :manual)
     function update_spectrum!(ip::Int)
         if 1 ≤ ip ≤ npix
             region_ipix[] = Int[]
@@ -593,6 +609,7 @@ function _view_healpix_cube(
 
     ui_theme = default_ui_theme()
     ui_accent = ui_theme.accent
+    ui_selection = ui_theme.selection
     ui_text_muted = ui_theme.text_muted
 
     # ---------- Figure ----------
@@ -651,12 +668,12 @@ function _view_healpix_cube(
         Point2f[Point2f(x0,y0),Point2f(x1,y0),Point2f(x1,y0),Point2f(x1,y1),
                 Point2f(x1,y1),Point2f(x0,y1),Point2f(x0,y1),Point2f(x0,y0)]
     end
-    linesegments!(ax_img, zoom_box_segments; color=(ui_accent,0.95),
+    linesegments!(ax_img, zoom_box_segments; color=(ui_selection,0.95),
                   linewidth=2.0, linestyle=:dash)
     region_segments = lift(region_start, region_end, region_shape, region_ipix, region_drag_active) do p0, p1, shape, ipixs, dragging
         (dragging || !isempty(ipixs)) ? projected_region_segments(p0, p1, shape) : Point2f[]
     end
-    lines!(ax_img, region_segments; color=(RGBf(1.0, 0.70, 0.12), 0.98), linewidth=2.3)
+    lines!(ax_img, region_segments; color=(ui_selection, 0.98), linewidth=2.3)
     marker_pts = lift(sel_xy) do p
         (isfinite(p[1]) && isfinite(p[2])) ? Point2f[p] : Point2f[]
     end
@@ -703,10 +720,10 @@ function _view_healpix_cube(
     chan_v = lift(chan_idx) do j; Float32(v0_eff + (j-1)*dv_eff); end
     vlines!(ax_spec, lift(v -> [v], chan_v); color=ui_accent, linewidth=1.2, linestyle=:dash)
 
-    # ylimits du spectre : suit clims si manuel, sinon auto sur le spectre courant
+    # ylimits du spectre : manuel, hérité du contraste initial, ou auto.
     function _refresh_spec_ylim!()
-        if use_manual[]
-            lo, hi = clims_manual[]
+        if spec_ylimits_source[] === :manual || spec_ylimits_source[] === :contrast
+            lo, hi = spec_ylimits_value[]
             ylims!(ax_spec, Float32(lo), Float32(hi))
         else
             ys = spec_y_disp[]
@@ -720,6 +737,17 @@ function _view_healpix_cube(
             end
         end
         xlims!(ax_spec, Float32(spec_x[1]), Float32(spec_x[end]))
+    end
+
+    function _refresh_hist_axes!()
+        xlo, xhi = hist_limits_obs[]
+        if hist_ylimits_manual[]
+            ylo, yhi = hist_ylimits_manual_value[]
+            limits!(ax_hist, Float32(xlo), Float32(xhi), Float32(ylo), Float32(yhi))
+        else
+            autolimits!(ax_hist)
+            xlims!(ax_hist, Float32(xlo), Float32(xhi))
+        end
     end
 
     ax_hist = Axis(
@@ -750,10 +778,12 @@ function _view_healpix_cube(
 
     Label(ctrl[1,4], text=L"\text{Scale}", halign=:left, tellwidth=false, fontsize=15)
     scale_menu = Menu(ctrl[1,5]; options=["lin","log10","ln"], prompt=String(scale), width=92)
-    invert_chk = Checkbox(ctrl[1,6]); Label(ctrl[1,7], text="Invert", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[1,6], text=L"\text{Colormap}", halign=:left, tellwidth=false, fontsize=15)
+    cmap_menu = Menu(ctrl[1,7]; options=ui_colormap_options(), prompt=String(cmap), width=112)
+    invert_chk = Checkbox(ctrl[1,8]); Label(ctrl[1,9], text="Invert", halign=:left, tellwidth=false, fontsize=15)
     invert_chk.checked[] = invert_cmap[]
 
-    Label(ctrl[2,1], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[2,1], text=L"\text{Contrast}", halign=:left, tellwidth=false, fontsize=15)
     clim_min_box = Textbox(ctrl[2,2];  placeholder="min", width=100, height=30)
     clim_max_box = Textbox(ctrl[2,3]; placeholder="max", width=100, height=30)
     apply_btn    = Button(ctrl[2,4]; label="Apply",      width=80,  height=30)
@@ -767,13 +797,13 @@ function _view_healpix_cube(
     save_btn     = Button(ctrl[2,11]; label="Save PNG",   width=110, height=30)
 
     gauss_chk = Checkbox(ctrl[3,1])
-    Label(ctrl[3,2], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[3,2], text="Smoothing", halign=:left, tellwidth=false, fontsize=15)
     sigma_label = Label(ctrl[3,3], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
     sigma_slider = Slider(ctrl[3,4:6]; range=LinRange(0, 10, 101), startvalue=1.5, width=220, height=14)
 
-    Label(ctrl[3,7], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[3,7], text=L"\text{Selection}", halign=:left, tellwidth=false, fontsize=15)
     region_mode_menu = Menu(ctrl[3,8]; options=["point", "box", "circle"], prompt="point", width=108)
-    region_clear_btn = Button(ctrl[3,9]; label="Clear region", width=126, height=30)
+    region_clear_btn = Button(ctrl[3,9]; label="Clear selection", width=138, height=30)
     region_count_label = Label(ctrl[3,10]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
     Label(ctrl[4,1], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
     contour_chk = Checkbox(ctrl[4,2])
@@ -794,15 +824,23 @@ function _view_healpix_cube(
     hist_xmax_box = Textbox(ctrl[6,5]; placeholder="x max", width=100, height=30)
     hist_apply_btn = Button(ctrl[6,6]; label="Apply", width=80, height=30)
     hist_auto_btn = Button(ctrl[6,7]; label="Auto x", width=82, height=30)
-    foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, region_mode_menu, moment_menu, hist_mode_menu))
-    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, reset_btn, save_btn, region_clear_btn, contour_apply_btn, show_moment_btn, show_channel_btn, save_moment_fits_btn, hist_apply_btn, hist_auto_btn))
+    hist_ymin_box = Textbox(ctrl[6,8]; placeholder="y min", width=100, height=30)
+    hist_ymax_box = Textbox(ctrl[6,9]; placeholder="y max", width=100, height=30)
+    hist_y_auto_btn = Button(ctrl[6,10]; label="Auto y", width=82, height=30)
+    Label(ctrl[7,1], text=L"\text{Spectrum y}", halign=:left, tellwidth=false, fontsize=15)
+    spec_ymin_box = Textbox(ctrl[7,2]; placeholder="y min", width=100, height=30)
+    spec_ymax_box = Textbox(ctrl[7,3]; placeholder="y max", width=100, height=30)
+    spec_y_apply_btn = Button(ctrl[7,4]; label="Apply", width=80, height=30)
+    spec_y_auto_btn = Button(ctrl[7,5]; label="Auto y", width=82, height=30)
+    foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, cmap_menu, region_mode_menu, moment_menu, hist_mode_menu))
+    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, reset_btn, save_btn, region_clear_btn, contour_apply_btn, show_moment_btn, show_channel_btn, save_moment_fits_btn, hist_apply_btn, hist_auto_btn, hist_y_auto_btn, spec_y_apply_btn, spec_y_auto_btn))
     foreach(w -> manta_style_checkbox!(w, ui_theme), (invert_chk, graticule_chk, gauss_chk, contour_chk))
-    foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box))
+    foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box, hist_ymin_box, hist_ymax_box, spec_ymin_box, spec_ymax_box))
     foreach(w -> manta_style_slider!(w, ui_theme), (chan_slider, sigma_slider))
     rowsize!(main_grid, 1, Relative(1))
     rowsize!(main_grid, 2, Fixed(165))
     rowsize!(main_grid, 3, Fixed(100))
-    rowsize!(main_grid, 4, Fixed(240))
+    rowsize!(main_grid, 4, Fixed(270))
 
     if use_manual[]
         a, b = clims_manual[]
@@ -822,6 +860,16 @@ function _view_healpix_cube(
         lo, hi = hist_xlimits_manual_value[]
         set_box_text!(hist_xmin_box, string(lo))
         set_box_text!(hist_xmax_box, string(hi))
+    end
+    if hist_ylimits_manual[]
+        lo, hi = hist_ylimits_manual_value[]
+        set_box_text!(hist_ymin_box, string(lo))
+        set_box_text!(hist_ymax_box, string(hi))
+    end
+    if spec_ylimits_source[] !== :auto
+        lo, hi = spec_ylimits_value[]
+        set_box_text!(spec_ymin_box, string(lo))
+        set_box_text!(spec_ymax_box, string(hi))
     end
     function clear_region!()
         region_ipix[] = Int[]
@@ -844,7 +892,12 @@ function _view_healpix_cube(
         use_manual[] = true
         set_box_text!(clim_min_box, string(first(clims)))
         set_box_text!(clim_max_box, string(last(clims)))
-        _refresh_spec_ylim!()
+        if spec_ylimits_source[] === :contrast
+            spec_ylimits_value[] = clims
+            set_box_text!(spec_ymin_box, string(first(clims)))
+            set_box_text!(spec_ymax_box, string(last(clims)))
+            _refresh_spec_ylim!()
+        end
         nothing
     end
 
@@ -871,6 +924,10 @@ function _view_healpix_cube(
         clim_max_box.displayed_string[] = ""; clim_max_box.stored_string[] = ""
         scale_mode[] = new_mode
     end
+    on(cmap_menu.selection) do sel
+        sel === nothing && return
+        cmap_name[] = Symbol(sel)
+    end
     on(invert_chk.checked) do v; invert_cmap[] = v; end
     on(gauss_chk.checked) do v
         gauss_on[] = v
@@ -895,8 +952,18 @@ function _view_healpix_cube(
         if manual
             clims_manual[] = clims
             use_manual[]   = true
+            if spec_ylimits_source[] === :contrast
+                spec_ylimits_value[] = clims
+                set_box_text!(spec_ymin_box, string(first(clims)))
+                set_box_text!(spec_ymax_box, string(last(clims)))
+            end
         else
             use_manual[]   = false
+            if spec_ylimits_source[] === :contrast
+                spec_ylimits_source[] = :auto
+                set_box_text!(spec_ymin_box, "")
+                set_box_text!(spec_ymax_box, "")
+            end
         end
         _refresh_spec_ylim!()                # propage au spectre
     end
@@ -904,6 +971,11 @@ function _view_healpix_cube(
         use_manual[] = false
         set_box_text!(clim_min_box, "")
         set_box_text!(clim_max_box, "")
+        if spec_ylimits_source[] === :contrast
+            spec_ylimits_source[] = :auto
+            set_box_text!(spec_ymin_box, "")
+            set_box_text!(spec_ymax_box, "")
+        end
         _refresh_spec_ylim!()
     end
     on(p1_btn.clicks) do _; apply_percentile_clims!(1, 99); end
@@ -919,21 +991,66 @@ function _view_healpix_cube(
             get_box_str(hist_xmax_box);
             fallback = hist_xlimits_manual_value[],
         )
-        ok_bins && ok_x || return
+        ok_y, manual_y, ylim, _y_msg = parse_histogram_ylimits(
+            get_box_str(hist_ymin_box),
+            get_box_str(hist_ymax_box);
+            fallback = hist_ylimits_manual_value[],
+        )
+        ok_bins && ok_x && ok_y || return
         hist_bins_obs[] = bins
         hist_xlimits_manual_value[] = xlim
         hist_xlimits_manual[] = manual_x
+        hist_ylimits_manual_value[] = ylim
+        hist_ylimits_manual[] = manual_y
         set_box_text!(hist_bins_box, string(bins))
         set_box_text!(hist_xmin_box, manual_x ? string(first(xlim)) : "")
         set_box_text!(hist_xmax_box, manual_x ? string(last(xlim)) : "")
+        set_box_text!(hist_ymin_box, manual_y ? string(first(ylim)) : "")
+        set_box_text!(hist_ymax_box, manual_y ? string(last(ylim)) : "")
+        _refresh_hist_axes!()
     end
     on(hist_auto_btn.clicks) do _
         hist_xlimits_manual[] = false
         set_box_text!(hist_xmin_box, "")
         set_box_text!(hist_xmax_box, "")
+        _refresh_hist_axes!()
     end
-    on(hist_limits_obs) do lim
-        xlims!(ax_hist, Float32(first(lim)), Float32(last(lim)))
+    on(hist_y_auto_btn.clicks) do _
+        hist_ylimits_manual[] = false
+        set_box_text!(hist_ymin_box, "")
+        set_box_text!(hist_ymax_box, "")
+        _refresh_hist_axes!()
+    end
+    on(spec_y_apply_btn.clicks) do _
+        ok, manual, ylim, _msg = parse_spectrum_ylimits(
+            get_box_str(spec_ymin_box),
+            get_box_str(spec_ymax_box);
+            fallback = spec_ylimits_value[],
+        )
+        ok || return
+        if manual
+            spec_ylimits_value[] = ylim
+            spec_ylimits_source[] = :manual
+            set_box_text!(spec_ymin_box, string(first(ylim)))
+            set_box_text!(spec_ymax_box, string(last(ylim)))
+        else
+            spec_ylimits_source[] = :auto
+            set_box_text!(spec_ymin_box, "")
+            set_box_text!(spec_ymax_box, "")
+        end
+        _refresh_spec_ylim!()
+    end
+    on(spec_y_auto_btn.clicks) do _
+        spec_ylimits_source[] = :auto
+        set_box_text!(spec_ymin_box, "")
+        set_box_text!(spec_ymax_box, "")
+        _refresh_spec_ylim!()
+    end
+    on(hist_limits_obs) do _
+        _refresh_hist_axes!()
+    end
+    on(hist_y_obs) do _
+        _refresh_hist_axes!()
     end
     on(region_mode_menu.selection) do sel
         sel === nothing && return
@@ -989,7 +1106,12 @@ function _view_healpix_cube(
     on(scale_mode)        do _; _refresh_spec_ylim!(); end
     on(spec_y_disp)       do _; _refresh_spec_ylim!(); end
     on(use_manual)        do _; _refresh_spec_ylim!(); end
-    on(clims_manual)      do _; _refresh_spec_ylim!(); end
+    on(clims_manual)      do clims
+        if spec_ylimits_source[] === :contrast
+            spec_ylimits_value[] = clims
+        end
+        _refresh_spec_ylim!()
+    end
 
     # zoom right-drag + click left → select pixel
     on(events(ax_img).mousebutton) do ev
@@ -1072,6 +1194,7 @@ function _view_healpix_cube(
     # init
     update_spectrum!(max(1, npix ÷ 2))     # spectre par défaut au pixel central
     _refresh_spec_ylim!()
+    _refresh_hist_axes!()
 
     # Espacement vertical : éloigne la ligne de contrôles des xticks du
     # spectre pour éviter le chevauchement (ex: "j=41, v=80km/s" qui se

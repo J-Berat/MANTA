@@ -15,23 +15,29 @@ struct MANTAUITheme
     text::RGBf
     text_muted::RGBf
     background::RGBf
+    selection::RGBf
+    compare::RGBf
+    success::RGBf
 end
 
 default_ui_theme() = MANTAUITheme(
     RGBf(0.36, 0.39, 0.92),    # indigo-500
-    RGBf(0.62, 0.64, 0.96),    # indigo-300
+    RGBf(0.68, 0.70, 0.95),    # indigo-300
     RGBf(0.28, 0.31, 0.82),    # indigo-700
-    RGBf(0.88, 0.90, 0.95),    # slate-200
-    RGBf(0.985, 0.988, 0.996), # near-white card
-    RGBf(0.94, 0.95, 0.99),
-    RGBf(0.90, 0.92, 0.98),
-    RGBf(0.965, 0.970, 0.985),
-    RGBf(0.93, 0.94, 0.97),
-    RGBf(0.78, 0.81, 0.88),
-    RGBf(0.62, 0.66, 0.76),
+    RGBf(0.88, 0.89, 0.91),    # neutral-200
+    RGBf(0.985, 0.985, 0.982), # neutral card
+    RGBf(0.94, 0.945, 0.945),
+    RGBf(0.90, 0.91, 0.91),
+    RGBf(0.958, 0.960, 0.958),
+    RGBf(0.925, 0.930, 0.930),
+    RGBf(0.76, 0.78, 0.80),
+    RGBf(0.58, 0.61, 0.65),
     RGBf(0.10, 0.12, 0.20),
     RGBf(0.42, 0.46, 0.56),
-    RGBf(0.97, 0.975, 0.985),
+    RGBf(0.972, 0.974, 0.972),
+    RGBf(1.00, 0.68, 0.12),    # amber/orange selection
+    RGBf(0.90, 0.30, 0.16),    # red-orange comparison/residuals
+    RGBf(0.10, 0.58, 0.42),    # green saved/loaded states
 )
 
 function manta_style_checkbox!(chk, theme::MANTAUITheme = default_ui_theme(); compact::Bool = false)

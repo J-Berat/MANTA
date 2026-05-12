@@ -20,6 +20,7 @@ function _view_healpix_map(
     hist_mode::Symbol = :bars,
     hist_bins::Int = 64,
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     m          = ds.map
     column     = ds.column
@@ -101,6 +102,10 @@ function _view_healpix_map(
     hist_xlimits_manual_value = Observable(hist_xlimits === nothing ?
         (0f0, 1f0) :
         parse_histogram_xlimits(string(first(hist_xlimits)), string(last(hist_xlimits)))[3])
+    hist_ylimits_manual = Observable(hist_ylimits !== nothing)
+    hist_ylimits_manual_value = Observable(hist_ylimits === nothing ?
+        (0f0, 1f0) :
+        parse_histogram_ylimits(string(first(hist_ylimits)), string(last(hist_ylimits)))[3])
     hist_limits_obs = lift(hist_xlimits_manual, hist_xlimits_manual_value, clims_safe) do manual, xlim, clim
         manual ? xlim : clim
     end
@@ -127,6 +132,7 @@ function _view_healpix_map(
 
     ui_theme = default_ui_theme()
     ui_accent = ui_theme.accent
+    ui_selection = ui_theme.selection
     ui_text_muted = ui_theme.text_muted
 
     # ---------- Figure ----------
@@ -180,12 +186,12 @@ function _view_healpix_map(
             Point2f(x0,y1), Point2f(x0,y0),
         ]
     end
-    linesegments!(ax_img, zoom_box_segments; color=(ui_accent, 0.95),
+    linesegments!(ax_img, zoom_box_segments; color=(ui_selection, 0.95),
                   linewidth=2.0, linestyle=:dash)
     region_segments = lift(region_start, region_end, region_shape, region_ipix, region_drag_active) do p0, p1, shape, ipixs, dragging
         (dragging || !isempty(ipixs)) ? projected_region_segments(p0, p1, shape) : Point2f[]
     end
-    lines!(ax_img, region_segments; color=(RGBf(1.0, 0.70, 0.12), 0.98), linewidth=2.3)
+    lines!(ax_img, region_segments; color=(ui_selection, 0.98), linewidth=2.3)
 
     Colorbar(
         main_grid[2, 1],
@@ -225,11 +231,13 @@ function _view_healpix_map(
     Label(ctrl[1,1], text=L"\text{Scale}", halign=:left, tellwidth=false, fontsize=15)
     scale_menu = Menu(ctrl[1,2]; options=["lin","log10","ln"],
                      prompt = String(scale), width=92)
-    invert_chk = Checkbox(ctrl[1,3])
-    Label(ctrl[1,4], text="Invert colormap", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[1,3], text=L"\text{Colormap}", halign=:left, tellwidth=false, fontsize=15)
+    cmap_menu = Menu(ctrl[1,4]; options=ui_colormap_options(), prompt=String(cmap), width=112)
+    invert_chk = Checkbox(ctrl[1,5])
+    Label(ctrl[1,6], text="Invert", halign=:left, tellwidth=false, fontsize=15)
     invert_chk.checked[] = invert_cmap[]
 
-    Label(ctrl[2,1], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[2,1], text=L"\text{Contrast}", halign=:left, tellwidth=false, fontsize=15)
     clim_min_box = Textbox(ctrl[2,2]; placeholder="min", width=110, height=30)
     clim_max_box = Textbox(ctrl[2,3]; placeholder="max", width=110, height=30)
     apply_btn    = Button(ctrl[2,4]; label="Apply", width=80, height=30)
@@ -244,13 +252,13 @@ function _view_healpix_map(
     save_btn       = Button(ctrl[3,4]; label="Save PNG", width=120, height=30)
 
     gauss_chk = Checkbox(ctrl[3,5])
-    Label(ctrl[3,6], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[3,6], text="Smoothing", halign=:left, tellwidth=false, fontsize=15)
     sigma_label = Label(ctrl[3,7], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
     sigma_slider = Slider(ctrl[3,8:10]; range=LinRange(0, 10, 101), startvalue=1.5, width=210, height=14)
 
-    Label(ctrl[4,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[4,1], text=L"\text{Selection}", halign=:left, tellwidth=false, fontsize=15)
     region_mode_menu = Menu(ctrl[4,2]; options=["point", "box", "circle"], prompt="point", width=108)
-    region_clear_btn = Button(ctrl[4,3]; label="Clear region", width=126, height=30)
+    region_clear_btn = Button(ctrl[4,3]; label="Clear selection", width=138, height=30)
     region_count_label = Label(ctrl[4,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
     Label(ctrl[5,1], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
     contour_chk = Checkbox(ctrl[5,2])
@@ -265,11 +273,14 @@ function _view_healpix_map(
     hist_xmax_box = Textbox(ctrl[6,5]; placeholder="x max", width=100, height=30)
     hist_apply_btn = Button(ctrl[6,6]; label="Apply", width=80, height=30)
     hist_auto_btn = Button(ctrl[6,7]; label="Auto x", width=82, height=30)
+    hist_ymin_box = Textbox(ctrl[6,8]; placeholder="y min", width=100, height=30)
+    hist_ymax_box = Textbox(ctrl[6,9]; placeholder="y max", width=100, height=30)
+    hist_y_auto_btn = Button(ctrl[6,10]; label="Auto y", width=82, height=30)
 
-    foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, region_mode_menu, hist_mode_menu))
-    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, reset_zoom_btn, save_btn, region_clear_btn, contour_apply_btn, hist_apply_btn, hist_auto_btn))
+    foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, cmap_menu, region_mode_menu, hist_mode_menu))
+    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, reset_zoom_btn, save_btn, region_clear_btn, contour_apply_btn, hist_apply_btn, hist_auto_btn, hist_y_auto_btn))
     foreach(w -> manta_style_checkbox!(w, ui_theme), (invert_chk, graticule_chk, gauss_chk, contour_chk))
-    foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box))
+    foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box, hist_ymin_box, hist_ymax_box))
     manta_style_slider!(sigma_slider, ui_theme)
 
     if use_manual[]
@@ -290,6 +301,11 @@ function _view_healpix_map(
         lo, hi = hist_xlimits_manual_value[]
         set_box_text!(hist_xmin_box, string(lo))
         set_box_text!(hist_xmax_box, string(hi))
+    end
+    if hist_ylimits_manual[]
+        lo, hi = hist_ylimits_manual_value[]
+        set_box_text!(hist_ymin_box, string(lo))
+        set_box_text!(hist_ymax_box, string(hi))
     end
     function clear_region!()
         region_ipix[] = Int[]
@@ -322,10 +338,25 @@ function _view_healpix_map(
         nothing
     end
 
+    function refresh_hist_axes!()
+        xlo, xhi = hist_limits_obs[]
+        if hist_ylimits_manual[]
+            ylo, yhi = hist_ylimits_manual_value[]
+            limits!(ax_hist, Float32(xlo), Float32(xhi), Float32(ylo), Float32(yhi))
+        else
+            autolimits!(ax_hist)
+            xlims!(ax_hist, Float32(xlo), Float32(xhi))
+        end
+    end
+
     # ---------- Reactivity ----------
     on(scale_menu.selection) do sel
         sel === nothing && return
         scale_mode[] = Symbol(sel)
+    end
+    on(cmap_menu.selection) do sel
+        sel === nothing && return
+        cmap_name[] = Symbol(sel)
     end
     on(invert_chk.checked) do v; invert_cmap[] = v; end
     on(gauss_chk.checked) do v
@@ -372,21 +403,41 @@ function _view_healpix_map(
             get_box_str(hist_xmax_box);
             fallback = hist_xlimits_manual_value[],
         )
-        ok_bins && ok_x || return
+        ok_y, manual_y, ylim, _y_msg = parse_histogram_ylimits(
+            get_box_str(hist_ymin_box),
+            get_box_str(hist_ymax_box);
+            fallback = hist_ylimits_manual_value[],
+        )
+        ok_bins && ok_x && ok_y || return
         hist_bins_obs[] = bins
         hist_xlimits_manual_value[] = xlim
         hist_xlimits_manual[] = manual_x
+        hist_ylimits_manual_value[] = ylim
+        hist_ylimits_manual[] = manual_y
         set_box_text!(hist_bins_box, string(bins))
         set_box_text!(hist_xmin_box, manual_x ? string(first(xlim)) : "")
         set_box_text!(hist_xmax_box, manual_x ? string(last(xlim)) : "")
+        set_box_text!(hist_ymin_box, manual_y ? string(first(ylim)) : "")
+        set_box_text!(hist_ymax_box, manual_y ? string(last(ylim)) : "")
+        refresh_hist_axes!()
     end
     on(hist_auto_btn.clicks) do _
         hist_xlimits_manual[] = false
         set_box_text!(hist_xmin_box, "")
         set_box_text!(hist_xmax_box, "")
+        refresh_hist_axes!()
     end
-    on(hist_limits_obs) do lim
-        xlims!(ax_hist, Float32(first(lim)), Float32(last(lim)))
+    on(hist_y_auto_btn.clicks) do _
+        hist_ylimits_manual[] = false
+        set_box_text!(hist_ymin_box, "")
+        set_box_text!(hist_ymax_box, "")
+        refresh_hist_axes!()
+    end
+    on(hist_limits_obs) do _
+        refresh_hist_axes!()
+    end
+    on(hist_y_obs) do _
+        refresh_hist_axes!()
     end
     on(region_mode_menu.selection) do sel
         sel === nothing && return
@@ -505,6 +556,7 @@ function _view_healpix_map(
         end
     end
 
+    refresh_hist_axes!()
     keepalive!(fig)
     on(fig.scene.events.window_open) do is_open
         is_open || forget!(fig)
