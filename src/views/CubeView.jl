@@ -37,6 +37,9 @@ function _view_cube(
     activate_gl::Bool = true,
     display_fig::Bool = true,
     settings_path::Union{Nothing,AbstractString} = nothing,
+    hist_mode::Symbol = :bars,
+    hist_bins::Int = 64,
+    hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     data = as_float32(ds.data)
     siz  = size(data)
@@ -147,94 +150,22 @@ function _view_cube(
     zoom_drag_start  = Observable(Point2f(NaN32, NaN32))
     zoom_drag_end    = Observable(Point2f(NaN32, NaN32))
 
-    # Modern UI palette — indigo accent on cool neutral surfaces
-    ui_accent         = RGBf(0.36, 0.39, 0.92)    # indigo-500
-    ui_accent_dim     = RGBf(0.62, 0.64, 0.96)    # indigo-300
-    ui_accent_strong  = RGBf(0.28, 0.31, 0.82)    # indigo-700 (hover/active)
-    ui_track          = RGBf(0.88, 0.90, 0.95)    # slate-200
-    ui_surface        = RGBf(0.985, 0.988, 0.996) # near-white card
-    ui_surface_hover  = RGBf(0.94, 0.95, 0.99)
-    ui_surface_active = RGBf(0.90, 0.92, 0.98)
-    ui_panel          = RGBf(0.965, 0.970, 0.985) # softer slate panel
-    ui_panel_header   = RGBf(0.93, 0.94, 0.97)
-    ui_border         = RGBf(0.78, 0.81, 0.88)
-    ui_border_strong  = RGBf(0.62, 0.66, 0.76)
-    ui_text           = RGBf(0.10, 0.12, 0.20)
-    ui_text_muted     = RGBf(0.42, 0.46, 0.56)
-    fig_bg            = RGBf(0.97, 0.975, 0.985)
+    ui_theme = default_ui_theme()
+    ui_accent = ui_theme.accent
+    ui_accent_strong = ui_theme.accent_strong
+    ui_surface = ui_theme.surface
+    ui_panel = ui_theme.panel
+    ui_panel_header = ui_theme.panel_header
+    ui_border = ui_theme.border
+    ui_text = ui_theme.text
+    ui_text_muted = ui_theme.text_muted
+    fig_bg = ui_theme.background
 
-    style_checkbox!(chk) = begin
-        chk.size[] = 22
-        chk.checkmarksize[] = 0.62
-        chk.roundness[] = 0.5
-        chk.checkboxstrokewidth[] = 1.4
-        chk.checkboxcolor_checked[] = ui_accent
-        chk.checkboxcolor_unchecked[] = RGBf(0.96, 0.965, 0.985)
-        chk.checkboxstrokecolor_checked[] = ui_accent_strong
-        chk.checkboxstrokecolor_unchecked[] = ui_border
-        chk.checkmarkcolor_checked[] = :white
-        chk.checkmarkcolor_unchecked[] = RGBf(0.65, 0.70, 0.78)
-        chk
-    end
-
-    # Sliders : track plus large, accent indigo, contraste fort
-    style_slider!(sl) = begin
-        sl.height[] = 26
-        sl.linewidth[] = 10
-        sl.color_active[] = ui_accent
-        sl.color_active_dimmed[] = ui_accent_dim
-        sl.color_inactive[] = ui_track
-        sl
-    end
-
-    style_button!(btn) = begin
-        btn.height[] = 34
-        btn.cornerradius[] = 8
-        btn.strokewidth[] = 1.0
-        btn.strokecolor[] = ui_border
-        btn.buttoncolor[] = ui_surface
-        btn.buttoncolor_hover[] = ui_surface_hover
-        btn.buttoncolor_active[] = ui_surface_active
-        btn.labelcolor[] = ui_text
-        btn.labelcolor_hover[] = ui_accent_strong
-        btn.labelcolor_active[] = ui_accent_strong
-        btn.fontsize[] = 14
-        btn.padding[] = (12, 12, 7, 7)
-        btn
-    end
-
-    style_menu!(menu) = begin
-        menu.height[] = 34
-        menu.width[] = max(menu.width[], 96)
-        menu.textcolor[] = ui_text
-        menu.fontsize[] = 14
-        menu.dropdown_arrow_color[] = ui_accent
-        menu.dropdown_arrow_size[] = 11
-        menu.textpadding[] = (10, 10, 7, 7)
-        menu.cell_color_inactive_even[] = ui_surface
-        menu.cell_color_inactive_odd[] = ui_surface
-        menu.selection_cell_color_inactive[] = ui_surface
-        menu.cell_color_hover[] = ui_surface_hover
-        menu.cell_color_active[] = ui_surface_active
-        menu
-    end
-
-    style_textbox!(tb) = begin
-        tb.height[] = 34
-        tb.fontsize[] = 14
-        tb.textcolor[] = ui_text
-        tb.textcolor_placeholder[] = ui_text_muted
-        tb.boxcolor[] = ui_surface
-        tb.boxcolor_hover[] = ui_surface_hover
-        tb.boxcolor_focused[] = RGBf(1.0, 1.0, 1.0)
-        tb.bordercolor[] = ui_border
-        tb.bordercolor_hover[] = ui_accent_dim
-        tb.bordercolor_focused[] = ui_accent
-        tb.borderwidth[] = 1.4
-        tb.cornerradius[] = 8
-        tb.textpadding[] = (10, 10, 7, 7)
-        tb
-    end
+    style_checkbox!(chk) = manta_style_checkbox!(chk, ui_theme; compact = compact_layout)
+    style_slider!(sl) = manta_style_slider!(sl, ui_theme; compact = compact_layout)
+    style_button!(btn) = manta_style_button!(btn, ui_theme; compact = compact_layout)
+    style_menu!(menu) = manta_style_menu!(menu, ui_theme; compact = compact_layout)
+    style_textbox!(tb) = manta_style_textbox!(tb, ui_theme; compact = compact_layout)
 
     latex_tick(v::Real) = begin
         x = abs(Float64(v)) < 1e-10 ? 0.0 : Float64(v)
@@ -350,21 +281,36 @@ function _view_cube(
         end
     end
 
-    hist_pair_obs = lift(slice_disp, clims_safe) do s, lim
-        histogram_counts(s; bins = 64, limits = lim)
+    hist_mode_obs = Observable(normalize_histogram_mode(hist_mode))
+    hist_bins_obs = Observable(clamp(hist_bins, 4, 512))
+    hist_xlimits_manual = Observable(hist_xlimits !== nothing)
+    hist_xlimits_manual_value = Observable(hist_xlimits === nothing ?
+        (0f0, 1f0) :
+        parse_histogram_xlimits(string(first(hist_xlimits)), string(last(hist_xlimits)))[3])
+    hist_limits_obs = lift(hist_xlimits_manual, hist_xlimits_manual_value, clims_safe) do manual, xlim, clim
+        manual ? xlim : clim
     end
-    hist_x_obs = lift(p -> p[1], hist_pair_obs)
-    hist_y_obs = lift(p -> p[2], hist_pair_obs)
 
-    compare_hist_pair_obs = lift(compare_slice_proc, img_scale_mode, compare_visible, clims_safe) do s, mode, visible, lim
+    hist_pair_obs = lift(slice_disp, hist_limits_obs, hist_bins_obs, hist_mode_obs) do s, lim, bins, mode
+        histogram_profile(s; bins = bins, limits = lim, mode = mode)
+    end
+    hist_x_obs = lift(p -> p.x, hist_pair_obs)
+    hist_y_obs = lift(p -> p.y, hist_pair_obs)
+    hist_width_obs = lift(p -> p.width, hist_pair_obs)
+    hist_bars_visible = lift(m -> m === :bars, hist_mode_obs)
+    hist_kde_visible = lift(m -> m === :kde, hist_mode_obs)
+    hist_ylabel_obs = lift(histogram_ylabel, hist_mode_obs)
+
+    compare_hist_pair_obs = lift(compare_slice_proc, img_scale_mode, compare_visible, hist_limits_obs, hist_bins_obs, hist_mode_obs) do s, scale_mode, visible, lim, bins, hist_mode_
         visible || return (Float32[], Float32[])
-        A = apply_scale(s, mode)
+        A = apply_scale(s, scale_mode)
         out = similar(A, Float32)
         @inbounds for i in eachindex(A)
             x = A[i]
             out[i] = isfinite(x) ? Float32(x) : 0f0
         end
-        histogram_counts(out; bins = 64, limits = lim)
+        profile = histogram_profile(out; bins = bins, limits = lim, mode = hist_mode_)
+        return (profile.x, profile.y)
     end
     compare_hist_x_obs = lift(p -> p[1], compare_hist_pair_obs)
     compare_hist_y_obs = lift(p -> p[2], compare_hist_pair_obs)
@@ -398,8 +344,8 @@ function _view_cube(
     hist_axis_height = compact_layout ? 60 : 105
     ps_header_height = compact_layout ? 0 : 90
     ps_axis_size = compact_layout ? 320 : 520
-    controls_height = compact_layout ? 400 : 488
-    controls_row_heights = compact_layout ? (150, 128, 106) : (184, 148, 148)
+    controls_height = compact_layout ? 330 : 380
+    controls_row_heights = compact_layout ? (40, 150, 122) : (44, 184, 124)
     controls_gap = compact_layout ? 8 : 16
     card_pad = compact_layout ? 6 : 12
     card_gap = compact_layout ? 6 : 10
@@ -586,12 +532,13 @@ function _view_cube(
         spec_grid[3, 1];
         title = L"\text{Visible slice histogram}",
         xlabel = unit_label_tex,
-        ylabel = L"\text{count}",
+        ylabel = hist_ylabel_obs,
         height = hist_axis_height,
         xtickformat = latex_tick_formatter,
         ytickformat = latex_tick_formatter,
     )
-    lines!(ax_hist, hist_x_obs, hist_y_obs; color = ui_accent, linewidth = 1.6)
+    barplot!(ax_hist, hist_x_obs, hist_y_obs; width = hist_width_obs, color = (ui_accent, 0.44), strokecolor = ui_accent, strokewidth = 0.3, visible = hist_bars_visible)
+    lines!(ax_hist, hist_x_obs, hist_y_obs; color = ui_accent, linewidth = 1.8, visible = hist_kde_visible)
     lines!(ax_hist, compare_hist_x_obs, compare_hist_y_obs; color = RGBf(0.92, 0.42, 0.18), linewidth = 1.6, visible = compare_visible)
     vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe); color = (ui_text_muted, 0.65), linewidth = 1.1, linestyle = :dash)
 
@@ -665,7 +612,15 @@ function _view_cube(
     end
     control_label!(layout, pos, txt) = Label(layout[pos...]; text = txt, halign = :left, tellwidth = false, fontsize = 13, color = ui_text_muted)
 
-    view_card = control_card!(controls_grid, 1, 1, "View"; rows = 5, cols = 4)
+    mode_bar = controls_grid[1, 1:3] = GridLayout(; alignmode = Outside(0))
+    colgap!(mode_bar, compact_layout ? 6 : 10)
+    mode_nav_btn = Button(mode_bar[1, 1]; label = "Navigation", width = 140, height = 32)
+    mode_analysis_btn = Button(mode_bar[1, 2]; label = "Analysis", width = 126, height = 32)
+    mode_export_btn = Button(mode_bar[1, 3]; label = "Export", width = 104, height = 32)
+    foreach(c -> colsize!(mode_bar, c, Auto()), 1:3)
+    control_mode = Observable(:navigation)
+
+    view_card = control_card!(controls_grid, 2, 1, "View"; rows = 5, cols = 4)
     control_label!(view_card, (2, 1), "Image")
     img_scale_menu = Menu(view_card[2, 2]; options = ["lin", "log10", "ln"], prompt = "lin", width = 96)
     control_label!(view_card, (3, 1), "Spectrum")
@@ -675,7 +630,7 @@ function _view_cube(
     base_layout_btn = Button(view_card[5, 1:4]; label = "Base layout", width = 240, height = 32)
     foreach(c -> colsize!(view_card, c, Auto()), 1:4)
 
-    slice_card = control_card!(controls_grid, 1, 2, "Slice"; rows = 4, cols = 5)
+    slice_card = control_card!(controls_grid, 2, 2, "Slice"; rows = 4, cols = 5)
     axes_labels = ["dim1 (x)", "dim2 (y)", "dim3 (z)"]
     control_label!(slice_card, (2, 1), "Axis")
     axis_menu = Menu(slice_card[2, 2]; options = axes_labels, prompt = "dim3 (z)", width = 128)
@@ -687,7 +642,7 @@ function _view_cube(
     sigma_slider = Slider(slice_card[4, 3:5]; range = LinRange(0, 10, 101), startvalue = 1.5, width = 230, height = 26)
     foreach(c -> colsize!(slice_card, c, Auto()), 1:5)
 
-    contrast_card = control_card!(controls_grid, 1, 3, "Contrast"; rows = 4, cols = 5)
+    contrast_card = control_card!(controls_grid, 2, 1, "Contrast"; rows = 4, cols = 5)
     clim_min_box   = Textbox(contrast_card[2, 1]; placeholder = "min", width = 120, height = 32)
     clim_max_box   = Textbox(contrast_card[2, 2]; placeholder = "max", width = 120, height = 32)
     clim_apply_btn = Button(contrast_card[2, 3]; label = "Apply", width = 86, height = 32)
@@ -699,14 +654,15 @@ function _view_cube(
     output_card = control_card!(controls_grid, 2, 1, "Output"; rows = 5, cols = 5)
     fmt_menu  = Menu(output_card[2, 1]; options = ["png", "pdf"], prompt = "png", width = 90)
     fname_box = Textbox(output_card[2, 2:4]; placeholder = "filename base", width = 220, height = 32)
-    btn_save_img  = Button(output_card[3, 1]; label = "Image", width = 88, height = 32)
-    btn_save_spec = Button(output_card[3, 2]; label = "Spectrum", width = 108, height = 32)
+    btn_save_img  = Button(output_card[3, 1]; label = "Save image", width = 116, height = 32)
+    btn_save_spec = Button(output_card[3, 2]; label = "Save spectrum", width = 138, height = 32)
     btn_save_state = Button(output_card[3, 3]; label = "Save state", width = 112, height = 32)
     btn_load_state = Button(output_card[3, 4]; label = "Load state", width = 112, height = 32)
-    btn_show_compare = Button(output_card[4, 1]; label = "Add dual", width = 112, height = 32)
+    btn_show_compare = Button(output_card[4, 1]; label = "Compare cube...", width = 138, height = 32)
     compare_path_box = Textbox(output_card[4, 2:4]; placeholder = "", width = 0, height = 32)
     btn_load_compare = Button(output_card[4, 5]; label = "", width = 0, height = 32)
     compare_mode_menu = Menu(output_card[4, 2:3]; options = ["A", "B", "A - B", "A / B", "resid z"], prompt = "B", width = 0)
+    compare_state_label = Label(output_card[5, 1:5]; text = "Comparison: no cube loaded", halign = :left, tellwidth = false, fontsize = 13, color = ui_text_muted)
     foreach(c -> colsize!(output_card, c, Auto()), 1:5)
 
     region_card = control_card!(controls_grid, 2, 2, "Region Spectrum"; rows = 3, cols = 4)
@@ -715,14 +671,23 @@ function _view_cube(
     region_count_label = Label(region_card[2, 3:4]; text = "0 px", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
     foreach(c -> colsize!(region_card, c, Auto()), 1:4)
 
-    contour_card = control_card!(controls_grid, 3, 1, "Contours"; rows = 3, cols = 5)
+    contour_card = control_card!(controls_grid, 2, 3, "Contours"; rows = 3, cols = 5)
     contour_chk = Checkbox(contour_card[2, 1])
     Label(contour_card[2, 2]; text = "Show", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
     contour_levels_box = Textbox(contour_card[2, 3:4]; placeholder = "auto or 1:red, 2:#00ffaa", width = 190, height = 32)
     contour_apply_btn = Button(contour_card[2, 5]; label = "Apply", width = 82, height = 32)
     foreach(c -> colsize!(contour_card, c, Auto()), 1:5)
 
-    anim_card = control_card!(controls_grid, 3, 2, "Animation"; rows = 4, cols = 5)
+    hist_card = control_card!(controls_grid, 3, 2, "Histogram"; rows = 4, cols = 5)
+    hist_mode_menu = Menu(hist_card[2, 1]; options = ["bars", "kde"], prompt = String(hist_mode_obs[]), width = 96)
+    hist_bins_box = Textbox(hist_card[2, 2]; placeholder = "bins", width = 76, height = 32)
+    hist_apply_btn = Button(hist_card[2, 3]; label = "Apply", width = 82, height = 32)
+    hist_auto_btn = Button(hist_card[2, 4]; label = "Auto x", width = 82, height = 32)
+    hist_xmin_box = Textbox(hist_card[3, 1:2]; placeholder = "x min", width = 140, height = 32)
+    hist_xmax_box = Textbox(hist_card[3, 3:4]; placeholder = "x max", width = 140, height = 32)
+    foreach(c -> colsize!(hist_card, c, Auto()), 1:5)
+
+    anim_card = control_card!(controls_grid, 2, 3, "Animation"; rows = 4, cols = 5)
     start_box = Textbox(anim_card[2, 1]; placeholder = "start", width = 72, height = 32)
     stop_box  = Textbox(anim_card[2, 2]; placeholder = "stop",  width = 72, height = 32)
     step_box  = Textbox(anim_card[2, 3]; placeholder = "step",  width = 72, height = 32)
@@ -741,7 +706,7 @@ function _view_cube(
     pingpong_chk = Checkbox(display_card[4, 3]); Label(display_card[4, 4], text = "Ping-pong", halign = :left, tellwidth = false, fontsize = 14, color = ui_text)
     foreach(c -> colsize!(display_card, c, Auto()), 1:4)
 
-    moment_card = control_card!(controls_grid, 3, 3, "Products"; rows = 4, cols = 5)
+    moment_card = control_card!(controls_grid, 3, 1, "Products"; rows = 4, cols = 5)
     moment_menu = Menu(moment_card[2, 1]; options = ["M0 integrated", "M1 mean", "M2 dispersion"], prompt = "M0 integrated", width = 138)
     btn_show_moment = Button(moment_card[2, 2]; label = "Show", width = 82, height = 32)
     btn_show_slice = Button(moment_card[2, 3]; label = "Slice", width = 82, height = 32)
@@ -784,6 +749,9 @@ function _view_cube(
     style_textbox!(clim_max_box)
     style_textbox!(ps_kmin_box)
     style_textbox!(ps_kmax_box)
+    style_button!(mode_nav_btn)
+    style_button!(mode_analysis_btn)
+    style_button!(mode_export_btn)
     style_button!(reset_zoom_btn)
     style_button!(ps_btn)
     style_button!(base_layout_btn)
@@ -805,10 +773,16 @@ function _view_cube(
     style_button!(clim_p1_btn)
     style_button!(clim_p5_btn)
     style_menu!(region_mode_menu)
+    style_menu!(hist_mode_menu)
     style_button!(region_clear_btn)
     style_checkbox!(contour_chk)
     style_textbox!(contour_levels_box)
     style_button!(contour_apply_btn)
+    style_textbox!(hist_bins_box)
+    style_textbox!(hist_xmin_box)
+    style_textbox!(hist_xmax_box)
+    style_button!(hist_apply_btn)
+    style_button!(hist_auto_btn)
     style_button!(btn_show_moment)
     style_button!(btn_show_slice)
     style_button!(btn_moment_png)
@@ -822,13 +796,14 @@ function _view_cube(
                     btn_save_img, btn_save_spec, btn_save_state, btn_load_state,
                     btn_show_compare, btn_load_compare, play_btn, anim_btn, clim_apply_btn,
                     clim_auto_btn, clim_p1_btn, clim_p5_btn, region_clear_btn, contour_apply_btn,
+                    hist_apply_btn, hist_auto_btn,
                     btn_show_moment, btn_show_slice, btn_moment_png, btn_moment_fits, btn_save_fits)
             btn.height[] = 30
             btn.fontsize[] = 13
             btn.padding[] = (9, 9, 5, 5)
         end
         for menu in (img_scale_menu, spec_scale_menu, ps_mode_menu, ps_src_menu, ps_win_menu,
-                     ps_unit_menu, fmt_menu, compare_mode_menu, axis_menu, region_mode_menu,
+                     ps_unit_menu, fmt_menu, compare_mode_menu, axis_menu, region_mode_menu, hist_mode_menu,
                      moment_menu, fits_product_menu)
             menu.height[] = 30
             menu.fontsize[] = 13
@@ -836,7 +811,8 @@ function _view_cube(
             menu.dropdown_arrow_size[] = 10
         end
         for tb in (ps_kmin_box, ps_kmax_box, clim_min_box, clim_max_box, fname_box,
-                   compare_path_box, contour_levels_box, start_box, stop_box, step_box, fps_box)
+                   compare_path_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box,
+                   start_box, stop_box, step_box, fps_box)
             tb.height[] = 30
             tb.fontsize[] = 13
             tb.textpadding[] = (8, 8, 5, 5)
@@ -886,6 +862,12 @@ function _view_cube(
         tb.stored_string[] = str
         nothing
     end
+    set_box_text!(hist_bins_box, string(hist_bins_obs[]))
+    if hist_xlimits_manual[]
+        lo, hi = hist_xlimits_manual_value[]
+        set_box_text!(hist_xmin_box, string(lo))
+        set_box_text!(hist_xmax_box, string(hi))
+    end
 
     set_block_visible!(block, visible::Bool) = begin
         try
@@ -915,6 +897,37 @@ function _view_cube(
         nothing
     end
 
+    nav_cards = (view_card, slice_card, display_card)
+    analysis_cards = (contrast_card, region_card, contour_card, hist_card, moment_card)
+    export_cards = (output_card, anim_card)
+
+    function set_mode_button_active!(btn, active::Bool)
+        btn.buttoncolor[] = active ? ui_theme.surface_active : ui_theme.surface
+        btn.buttoncolor_hover[] = active ? ui_theme.surface_active : ui_theme.surface_hover
+        btn.labelcolor[] = active ? ui_accent_strong : ui_text
+        btn.labelcolor_hover[] = ui_accent_strong
+        btn.strokecolor[] = active ? ui_accent : ui_border
+        nothing
+    end
+
+    function refresh_control_mode!()
+        mode = control_mode[]
+        for card in nav_cards
+            set_layout_contents_visible!(card, mode === :navigation)
+        end
+        for card in analysis_cards
+            set_layout_contents_visible!(card, mode === :analysis)
+        end
+        for card in export_cards
+            set_layout_contents_visible!(card, mode === :export)
+        end
+        set_mode_button_active!(mode_nav_btn, mode === :navigation)
+        set_mode_button_active!(mode_analysis_btn, mode === :analysis)
+        set_mode_button_active!(mode_export_btn, mode === :export)
+        nothing
+    end
+    refresh_control_mode!()
+
     set_block_visible!(ax_cmp, false)
 
     function show_compare_loader!()
@@ -923,9 +936,10 @@ function _view_cube(
         compare_mode_menu.width[] = 0
         compare_path_box.placeholder[] = "second cube FITS path"
         compare_path_box.width[] = 310
-        btn_load_compare.label[] = "Dual"
-        btn_load_compare.width[] = 82
-        set_status!("Enter the second cube FITS path, then click Dual.")
+        btn_load_compare.label[] = "Load cube"
+        btn_load_compare.width[] = 104
+        compare_state_label.text[] = "Comparison: waiting for cube path"
+        set_status!("Enter the second cube FITS path, then click Load cube.")
         nothing
     end
 
@@ -937,6 +951,11 @@ function _view_cube(
         btn_load_compare.label[] = ""
         btn_load_compare.width[] = 0
         compare_mode_menu.width[] = compare_visible[] ? 150 : 0
+        if !compare_visible[]
+            btn_show_compare.label[] = "Compare cube..."
+            btn_show_compare.width[] = 138
+            compare_state_label.text[] = "Comparison: no cube loaded"
+        end
         nothing
     end
 
@@ -986,7 +1005,8 @@ function _view_cube(
         ax_cmp.ygridvisible[] = show_grid[]
         autolimits!(ax_cmp)
         hide_compare_loader!()
-        set_status!("Dual view enabled with $(cmp_path).")
+        compare_state_label.text[] = "Comparison: cube loaded ($(compare_name[]))"
+        set_status!("Comparison cube loaded: $(cmp_path).")
         return true
     end
 
@@ -1146,7 +1166,20 @@ function _view_cube(
     # ---------- UI callbacks ----------
     syncing_slice_controls = Ref(false)
 
-        # Keep the slice slider synced to the active axis (range + knob position)
+    on(mode_nav_btn.clicks) do _
+        control_mode[] = :navigation
+        refresh_control_mode!()
+    end
+    on(mode_analysis_btn.clicks) do _
+        control_mode[] = :analysis
+        refresh_control_mode!()
+    end
+    on(mode_export_btn.clicks) do _
+        control_mode[] = :export
+        refresh_control_mode!()
+    end
+
+    # Keep the slice slider synced to the active axis (range + knob position)
     on(axis_menu.selection) do sel
         sel === nothing && return
         new_axis = findfirst(==(String(sel)), axes_labels)
@@ -1182,6 +1215,52 @@ function _view_cube(
     on(spec_scale_menu.selection) do sel
         sel === nothing && return
         spec_scale_mode[] = Symbol(sel)
+    end
+
+    on(hist_mode_menu.selection) do sel
+        sel === nothing && return
+        hist_mode_obs[] = normalize_histogram_mode(sel)
+        set_status!("Histogram mode set to $(String(hist_mode_obs[])).")
+    end
+
+    on(hist_apply_btn.clicks) do _
+        ok_bins, bins, bins_msg = parse_histogram_bins(get_box_str(hist_bins_box); fallback = hist_bins_obs[])
+        ok_x, manual_x, xlim, x_msg = parse_histogram_xlimits(
+            get_box_str(hist_xmin_box),
+            get_box_str(hist_xmax_box);
+            fallback = hist_xlimits_manual_value[],
+        )
+        if !ok_bins
+            set_status!(bins_msg)
+            return
+        end
+        if !ok_x
+            set_status!(x_msg)
+            return
+        end
+        hist_bins_obs[] = bins
+        hist_xlimits_manual_value[] = xlim
+        hist_xlimits_manual[] = manual_x
+        set_box_text!(hist_bins_box, string(bins))
+        if manual_x
+            set_box_text!(hist_xmin_box, string(first(xlim)))
+            set_box_text!(hist_xmax_box, string(last(xlim)))
+        else
+            set_box_text!(hist_xmin_box, "")
+            set_box_text!(hist_xmax_box, "")
+        end
+        set_status!("$(bins_msg) $(x_msg)")
+    end
+
+    on(hist_auto_btn.clicks) do _
+        hist_xlimits_manual[] = false
+        set_box_text!(hist_xmin_box, "")
+        set_box_text!(hist_xmax_box, "")
+        set_status!("Automatic histogram x-axis enabled.")
+    end
+
+    on(hist_limits_obs) do lim
+        xlims!(ax_hist, Float32(first(lim)), Float32(last(lim)))
     end
 
     on(invert_chk.checked) do v

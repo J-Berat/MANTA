@@ -1,4 +1,5 @@
 #       API stable: apply_scale, clamped_extrema, percentile_clims, histogram_counts,
+#                   histogram_profile, histogram_ylabel,
 #                   is_rgb_like, as_rgb_image, as_rgb_pixels, rgb_image,
 #                   nan_gaussian_filter,
 #                   automatic_contour_levels, parse_contour_levels,
@@ -20,6 +21,7 @@
 # Exports
 ############################
 export apply_scale, clamped_extrema, percentile_clims, histogram_counts
+export histogram_profile, histogram_ylabel
 export is_rgb_like, as_rgb_image, as_rgb_pixels, rgb_image
 export nan_gaussian_filter
 export automatic_contour_levels, parse_contour_levels
@@ -31,7 +33,7 @@ export dual_view_product, moments, moments_map, moment_map, moment_vectors, filt
 export make_info_tex
 export to_cmap, get_box_str, _pick_fig_size, _axis_render_height
 export latex_safe, make_main_title, make_slice_title, make_spec_title
-export parse_manual_clims, parse_gif_request
+export parse_manual_clims, parse_histogram_bins, parse_histogram_xlimits, parse_gif_request
 export SimpleWCSAxis, read_simple_wcs, has_wcs, world_coord
 export wcs_axis_label, format_world_coord, data_unit_label
 export save_viewer_settings, load_viewer_settings
@@ -350,6 +352,64 @@ function histogram_counts(vals; bins::Int = 48, limits = nothing)
     end
     centers = Float32[lo + (i - 0.5f0) * width for i in 1:nb]
     return (centers, counts)
+end
+
+normalize_histogram_mode(mode)::Symbol = begin
+    m = Symbol(lowercase(String(mode)))
+    if m in (:bar, :bars, :hist, :histogram)
+        :bars
+    elseif m in (:kde, :density)
+        :kde
+    else
+        :bars
+    end
+end
+
+histogram_ylabel(mode) = normalize_histogram_mode(mode) === :kde ? L"\text{density}" : L"\text{count}"
+
+function _smooth_histogram_density(counts::Vector{Float32}, width::Float32)
+    n = length(counts)
+    n == 0 && return Float32[]
+    total = sum(counts)
+    if total <= 0f0 || width <= 0f0
+        return zeros(Float32, n)
+    end
+    σ = Float32(max(1.0, n / 64))
+    radius = max(1, ceil(Int, 3σ))
+    offsets = -radius:radius
+    kernel = Float32[exp(-0.5f0 * (Float32(k) / σ)^2) for k in offsets]
+    kernel ./= sum(kernel)
+    smoothed = zeros(Float32, n)
+    @inbounds for i in 1:n
+        acc = 0f0
+        for (j, k) in enumerate(offsets)
+            idx = i + k
+            if 1 <= idx <= n
+                acc += counts[idx] * kernel[j]
+            end
+        end
+        smoothed[i] = acc / (total * width)
+    end
+    smoothed
+end
+
+"""
+    histogram_profile(vals; bins=48, limits=nothing, mode=:bars)
+        -> (x, y, width, mode)
+
+Histogram data prepared for UI display. `mode=:bars` returns bin counts;
+`mode=:kde` returns a binned Gaussian density estimate on the same x grid.
+"""
+function histogram_profile(vals; bins::Int = 48, limits = nothing, mode = :bars)
+    nb = max(1, bins)
+    centers, counts = histogram_counts(vals; bins = nb, limits = limits)
+    if isempty(centers)
+        return (x = Float32[], y = Float32[], width = 1f0, mode = normalize_histogram_mode(mode))
+    end
+    width = length(centers) > 1 ? Float32(centers[2] - centers[1]) : 1f0
+    mode_sym = normalize_histogram_mode(mode)
+    y = mode_sym === :kde ? _smooth_histogram_density(counts, width) : counts
+    return (x = centers, y = y, width = width, mode = mode_sym)
 end
 
 """
@@ -1121,10 +1181,10 @@ end
 """
     _pick_fig_size(sizeopt) -> (w::Int, h::Int)
 
-Use an explicit size when provided; otherwise, return a fallback `(1800, 1000)`.
+Use an explicit size when provided; otherwise, return a balanced fallback `(1500, 900)`.
 """
 @inline function _pick_fig_size(sizeopt)
-    sizeopt !== nothing ? (Int(sizeopt[1]), Int(sizeopt[2])) : (1800, 1000)
+    sizeopt !== nothing ? (Int(sizeopt[1]), Int(sizeopt[2])) : (1500, 900)
 end
 
 """
@@ -1177,6 +1237,73 @@ function parse_manual_clims(
         return (true, true, (lo, hi), "Expanded equal min/max colorbar limits to avoid zero width.")
     end
     return (true, true, (lo, hi), "Manual color limits applied.")
+end
+
+"""
+    parse_histogram_bins(txt; fallback=64, min_bins=4, max_bins=512)
+      -> (ok, bins, message)
+
+Validate the histogram bin count entered in the UI.
+"""
+function parse_histogram_bins(
+    txt::AbstractString;
+    fallback::Int = 64,
+    min_bins::Int = 4,
+    max_bins::Int = 512,
+)
+    s = strip(String(txt))
+    isempty(s) && return (true, clamp(fallback, min_bins, max_bins), "Histogram bin count unchanged.")
+    parsed = tryparse(Int, s)
+    if parsed === nothing
+        return (false, fallback, "Histogram bins must be an integer.")
+    end
+    bins = clamp(parsed, min_bins, max_bins)
+    if bins != parsed
+        return (true, bins, "Histogram bins were clamped to $(bins).")
+    end
+    return (true, bins, "Histogram bins set to $(bins).")
+end
+
+"""
+    parse_histogram_xlimits(min_txt, max_txt; fallback=(0f0, 1f0))
+      -> (ok, use_manual, limits, message)
+
+Validate user-provided histogram x-axis limits. Empty fields restore automatic
+limits, which follow the current color scale limits.
+"""
+function parse_histogram_xlimits(
+    min_txt::AbstractString,
+    max_txt::AbstractString;
+    fallback::Tuple{Float32,Float32} = (0f0, 1f0),
+)
+    smin = strip(String(min_txt))
+    smax = strip(String(max_txt))
+    if isempty(smin) && isempty(smax)
+        return (true, false, fallback, "Automatic histogram x-axis enabled.")
+    end
+    if isempty(smin) ⊻ isempty(smax)
+        return (false, false, fallback, "Fill both histogram x min and max, or clear both for auto mode.")
+    end
+    xmin = tryparse(Float32, smin)
+    xmax = tryparse(Float32, smax)
+    if xmin === nothing || xmax === nothing
+        return (false, false, fallback, "Histogram x-axis limits must be valid numbers.")
+    end
+    lo = Float32(xmin)
+    hi = Float32(xmax)
+    if !(isfinite(lo) && isfinite(hi))
+        return (false, false, fallback, "Histogram x-axis limits must be finite numbers.")
+    end
+    if lo > hi
+        lo, hi = hi, lo
+        return (true, true, (lo, hi), "Histogram x-axis limits were swapped because min > max.")
+    end
+    if lo == hi
+        lo = prevfloat(lo)
+        hi = nextfloat(hi)
+        return (true, true, (lo, hi), "Expanded equal histogram x-axis limits to avoid zero width.")
+    end
+    return (true, true, (lo, hi), "Manual histogram x-axis applied.")
 end
 
 """

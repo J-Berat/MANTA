@@ -17,6 +17,9 @@ function _view_healpix_map(
     save_dir::Union{Nothing,AbstractString} = nothing,
     activate_gl::Bool = true,
     display_fig::Bool = true,
+    hist_mode::Symbol = :bars,
+    hist_bins::Int = 64,
+    hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
 )
     m          = ds.map
     column     = ds.column
@@ -92,11 +95,24 @@ function _view_healpix_map(
     end
     show_contours = Observable(false)
 
-    hist_pair_obs = lift(img_disp, clims_safe) do im, lim
-        histogram_counts(im; bins = 64, limits = lim)
+    hist_mode_obs = Observable(normalize_histogram_mode(hist_mode))
+    hist_bins_obs = Observable(clamp(hist_bins, 4, 512))
+    hist_xlimits_manual = Observable(hist_xlimits !== nothing)
+    hist_xlimits_manual_value = Observable(hist_xlimits === nothing ?
+        (0f0, 1f0) :
+        parse_histogram_xlimits(string(first(hist_xlimits)), string(last(hist_xlimits)))[3])
+    hist_limits_obs = lift(hist_xlimits_manual, hist_xlimits_manual_value, clims_safe) do manual, xlim, clim
+        manual ? xlim : clim
     end
-    hist_x_obs = lift(p -> p[1], hist_pair_obs)
-    hist_y_obs = lift(p -> p[2], hist_pair_obs)
+    hist_pair_obs = lift(img_disp, hist_limits_obs, hist_bins_obs, hist_mode_obs) do im, lim, bins, mode
+        histogram_profile(im; bins = bins, limits = lim, mode = mode)
+    end
+    hist_x_obs = lift(p -> p.x, hist_pair_obs)
+    hist_y_obs = lift(p -> p.y, hist_pair_obs)
+    hist_width_obs = lift(p -> p.width, hist_pair_obs)
+    hist_bars_visible = lift(m -> m === :bars, hist_mode_obs)
+    hist_kde_visible = lift(m -> m === :kde, hist_mode_obs)
+    hist_ylabel_obs = lift(histogram_ylabel, hist_mode_obs)
 
     zoom_drag_active = Observable(false)
     zoom_drag_start  = Observable(Point2f(NaN32, NaN32))
@@ -109,11 +125,13 @@ function _view_healpix_map(
     region_end = Observable(Point2f(NaN32, NaN32))
     region_ipix = Observable(Int[])
 
-    ui_accent = RGBf(0.12, 0.45, 0.82)
+    ui_theme = default_ui_theme()
+    ui_accent = ui_theme.accent
+    ui_text_muted = ui_theme.text_muted
 
     # ---------- Figure ----------
     activate_gl ? GLMakie.activate!() : CairoMakie.activate!()
-    fig = Figure(size = _pick_fig_size(figsize))
+    fig = Figure(size = _pick_fig_size(figsize), backgroundcolor = ui_theme.background)
 
     main_grid = fig[1, 1] = GridLayout()
     colgap!(main_grid, -8)
@@ -191,18 +209,19 @@ function _view_healpix_map(
         main_grid[4, 1];
         title = L"\text{Visible map histogram}",
         xlabel = unit_label_tex,
-        ylabel = L"\text{count}",
+        ylabel = hist_ylabel_obs,
         height = 120,
         xtickformat = _latex_tick_formatter,
         ytickformat = _latex_tick_formatter,
     )
-    lines!(ax_hist, hist_x_obs, hist_y_obs; color=ui_accent, linewidth=1.5)
+    barplot!(ax_hist, hist_x_obs, hist_y_obs; width=hist_width_obs, color=(ui_accent, 0.44), strokecolor=ui_accent, strokewidth=0.3, visible=hist_bars_visible)
+    lines!(ax_hist, hist_x_obs, hist_y_obs; color=ui_accent, linewidth=1.8, visible=hist_kde_visible)
     vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe);
-            color=(:black, 0.45), linewidth=1.0, linestyle=:dash)
+            color=(ui_text_muted, 0.65), linewidth=1.0, linestyle=:dash)
     rowsize!(main_grid, 4, Fixed(105))
 
     ctrl = main_grid[5, 1] = GridLayout(; alignmode=Outside())
-    rowsize!(main_grid, 5, Fixed(190))
+    rowsize!(main_grid, 5, Fixed(225))
     Label(ctrl[1,1], text=L"\text{Scale}", halign=:left, tellwidth=false, fontsize=15)
     scale_menu = Menu(ctrl[1,2]; options=["lin","log10","ln"],
                      prompt = String(scale), width=92)
@@ -239,6 +258,19 @@ function _view_healpix_map(
     contour_levels_box = Textbox(ctrl[5,4:6]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
     contour_apply_btn = Button(ctrl[5,7]; label="Apply", width=80, height=30)
     contour_chk.checked[] = show_contours[]
+    Label(ctrl[6,1], text=L"\text{Histogram}", halign=:left, tellwidth=false, fontsize=15)
+    hist_mode_menu = Menu(ctrl[6,2]; options=["bars", "kde"], prompt=String(hist_mode_obs[]), width=92)
+    hist_bins_box = Textbox(ctrl[6,3]; placeholder="bins", width=80, height=30)
+    hist_xmin_box = Textbox(ctrl[6,4]; placeholder="x min", width=100, height=30)
+    hist_xmax_box = Textbox(ctrl[6,5]; placeholder="x max", width=100, height=30)
+    hist_apply_btn = Button(ctrl[6,6]; label="Apply", width=80, height=30)
+    hist_auto_btn = Button(ctrl[6,7]; label="Auto x", width=82, height=30)
+
+    foreach(w -> manta_style_menu!(w, ui_theme), (scale_menu, region_mode_menu, hist_mode_menu))
+    foreach(w -> manta_style_button!(w, ui_theme), (apply_btn, auto_btn, p1_btn, p5_btn, reset_zoom_btn, save_btn, region_clear_btn, contour_apply_btn, hist_apply_btn, hist_auto_btn))
+    foreach(w -> manta_style_checkbox!(w, ui_theme), (invert_chk, graticule_chk, gauss_chk, contour_chk))
+    foreach(w -> manta_style_textbox!(w, ui_theme), (clim_min_box, clim_max_box, contour_levels_box, hist_bins_box, hist_xmin_box, hist_xmax_box))
+    manta_style_slider!(sigma_slider, ui_theme)
 
     if use_manual[]
         a, b = clims_manual[]
@@ -252,6 +284,12 @@ function _view_healpix_map(
         tb.displayed_string[] = str
         tb.stored_string[] = str
         nothing
+    end
+    set_box_text!(hist_bins_box, string(hist_bins_obs[]))
+    if hist_xlimits_manual[]
+        lo, hi = hist_xlimits_manual_value[]
+        set_box_text!(hist_xmin_box, string(lo))
+        set_box_text!(hist_xmax_box, string(hi))
     end
     function clear_region!()
         region_ipix[] = Int[]
@@ -323,6 +361,33 @@ function _view_healpix_map(
     end
     on(p1_btn.clicks) do _; apply_percentile_clims!(1, 99); end
     on(p5_btn.clicks) do _; apply_percentile_clims!(5, 95); end
+    on(hist_mode_menu.selection) do sel
+        sel === nothing && return
+        hist_mode_obs[] = normalize_histogram_mode(sel)
+    end
+    on(hist_apply_btn.clicks) do _
+        ok_bins, bins, _bins_msg = parse_histogram_bins(get_box_str(hist_bins_box); fallback = hist_bins_obs[])
+        ok_x, manual_x, xlim, _x_msg = parse_histogram_xlimits(
+            get_box_str(hist_xmin_box),
+            get_box_str(hist_xmax_box);
+            fallback = hist_xlimits_manual_value[],
+        )
+        ok_bins && ok_x || return
+        hist_bins_obs[] = bins
+        hist_xlimits_manual_value[] = xlim
+        hist_xlimits_manual[] = manual_x
+        set_box_text!(hist_bins_box, string(bins))
+        set_box_text!(hist_xmin_box, manual_x ? string(first(xlim)) : "")
+        set_box_text!(hist_xmax_box, manual_x ? string(last(xlim)) : "")
+    end
+    on(hist_auto_btn.clicks) do _
+        hist_xlimits_manual[] = false
+        set_box_text!(hist_xmin_box, "")
+        set_box_text!(hist_xmax_box, "")
+    end
+    on(hist_limits_obs) do lim
+        xlims!(ax_hist, Float32(first(lim)), Float32(last(lim)))
+    end
     on(region_mode_menu.selection) do sel
         sel === nothing && return
         mode = Symbol(String(sel))

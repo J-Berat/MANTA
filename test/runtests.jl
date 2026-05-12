@@ -49,6 +49,22 @@ using Healpix
     @test length(hx) == 5
     @test length(hy) == 5
     @test sum(hy) == 10f0
+    hp = MANTA.histogram_profile(Float32.(1:10); bins = 5, mode = :bars)
+    @test length(hp.x) == 5
+    @test hp.mode === :bars
+    @test sum(hp.y) == 10f0
+    kde = MANTA.histogram_profile(Float32.(1:10); bins = 5, mode = :kde)
+    @test kde.mode === :kde
+    @test length(kde.y) == 5
+    @test all(isfinite, kde.y)
+    ok_bins, bins, _ = MANTA.parse_histogram_bins("128"; fallback = 64)
+    @test ok_bins && bins == 128
+    ok_bins2, bins2, _ = MANTA.parse_histogram_bins("9999"; fallback = 64)
+    @test ok_bins2 && bins2 == 512
+    ok_x, manual_x, xlim, _ = MANTA.parse_histogram_xlimits("10", "1")
+    @test ok_x && manual_x && xlim == (1f0, 10f0)
+    ok_x_auto, manual_x_auto, _, _ = MANTA.parse_histogram_xlimits("", "")
+    @test ok_x_auto && !manual_x_auto
 
     smoothed = MANTA.nan_gaussian_filter(Float32[NaN 1 1; NaN 1 1; NaN NaN NaN], 1.0)
     @test size(smoothed) == (3, 3)
@@ -251,7 +267,7 @@ end
     # explicit override
     @test MANTA._pick_fig_size((111, 222)) == (111, 222)
     # default when no explicit size is provided
-    @test MANTA._pick_fig_size(nothing) == (1800, 1000)
+    @test MANTA._pick_fig_size(nothing) == (1500, 900)
 end
 
 @testset "helpers: validation" begin
@@ -402,6 +418,18 @@ end
         @test fig_hpix isa Makie.Figure
         MANTA.forget!(fig_hpix)
 
+        fig_hpix_via_manta = MANTA.manta(
+            hpix_ppv_path;
+            activate_gl = false,
+            display_fig = false,
+            save_dir = tmp,
+            nx = 100,
+            ny = 50,
+            figsize = (800, 560),
+        )
+        @test fig_hpix_via_manta isa Makie.Figure
+        MANTA.forget!(fig_hpix_via_manta)
+
         hpix_map_path = joinpath(tmp, "healpix_map.fits")
         hpix_map = HealpixMap{Float64,RingOrder,Vector{Float64}}(collect(1.0:12.0))
         Healpix.saveToFITS(hpix_map, hpix_map_path; unit = "K")
@@ -416,6 +444,18 @@ end
         )
         @test fig_map isa Makie.Figure
         MANTA.forget!(fig_map)
+
+        fig_map_via_manta = MANTA.manta(
+            hpix_map_path;
+            activate_gl = false,
+            display_fig = false,
+            save_dir = tmp,
+            nx = 100,
+            ny = 50,
+            figsize = (800, 560),
+        )
+        @test fig_map_via_manta isa Makie.Figure
+        MANTA.forget!(fig_map_via_manta)
 
         missing = joinpath(tmp, "does_not_exist.fits")
         @test_throws ArgumentError MANTA.manta(missing; activate_gl = false, display_fig = false)
@@ -713,6 +753,24 @@ end
     @test fig_vc isa Makie.Figure
     @test MANTA.view_cube === MANTA._view_cube
 
+    hpix_map = HealpixMap{Float64,RingOrder,Vector{Float64}}(collect(1.0:12.0))
+    hpix_map_ds = MANTA.load_dataset(hpix_map)
+    @test hpix_map_ds isa MANTA.HealpixMapDataset
+    fig_hpix_map = MANTA.manta(hpix_map_ds;
+                               activate_gl = false, display_fig = false,
+                               nx = 60, ny = 30, figsize = (500, 320))
+    @test fig_hpix_map isa Makie.Figure
+    MANTA.forget!(fig_hpix_map)
+
+    hpix_cube_ds = MANTA.HealpixCubeDataset(reshape(Float32.(1:48), 12, 4);
+                                            nside = 1,
+                                            source_id = "synthetic_hpix_cube")
+    fig_hpix_cube = MANTA.manta(hpix_cube_ds;
+                                activate_gl = false, display_fig = false,
+                                nx = 60, ny = 30, figsize = (500, 360))
+    @test fig_hpix_cube isa Makie.Figure
+    MANTA.forget!(fig_hpix_cube)
+
     # VectorDataset is still explicitly unsupported.
     vds = MANTA.load_dataset(rand(Float32, 16))
     @test vds isa MANTA.VectorDataset
@@ -738,4 +796,3 @@ end
     fig64 = MANTA.view_cube(ds64; activate_gl = false, display_fig = false)
     @test fig64 isa Makie.Figure
 end
-

@@ -14,9 +14,14 @@ using LaTeXStrings
 using FITSIO
 using ColorTypes
 using FFTW
+using Healpix
 
 # ---- helpers ----
 include("helpers/Helpers.jl")
+include("helpers/UITheme.jl")
+
+# ---- datasets ----
+include("datasets/Datasets.jl")
 
 # ---- HEALPix viewer ----
 import Statistics: quantile
@@ -25,14 +30,14 @@ export manta_healpix, manta_healpix_cube, is_healpix_fits,
        read_healpix_map, mollweide_grid, mollweide_color_grid,
        valid_healpix_npix, manta_healpix_panels
 
-# ---- datasets + loaders ----
-include("datasets/Datasets.jl")
+# ---- loaders ----
 include("loaders/FITSLoader.jl")
 include("loaders/HDF5Loader.jl")
 include("loaders/InMemoryLoader.jl")
 include("datasets/LoadDataset.jl")
 
 # ---- views ----
+include("views/HealpixMapView.jl")
 include("views/CubeView.jl")
 
 export load_dataset
@@ -97,138 +102,48 @@ function manta(
     nx::Int = 1400,
     ny::Int = 700,
     scale::Symbol = :lin,
+    hist_mode::Symbol = :bars,
+    hist_bins::Int = 64,
+    hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     # HEALPix PPV cube (npix×nv) — axe vitesse pour le spectre
     v0::Real = 0.0,
     dv::Real = 1.0,
     vunit::AbstractString = "km/s",
     )
+    ds = load_dataset(filepath; column = column, v0 = v0, dv = dv, vunit = vunit)
 
-    # ---------- Load ----------
-    if !isfile(filepath)
-        throw(ArgumentError("FITS file not found: $(abspath(filepath))"))
+    if ds isa HealpixMapDataset
+        return manta(ds;
+            cmap = cmap === :viridis ? :inferno : cmap,
+            vmin = vmin, vmax = vmax, invert = invert, scale = scale,
+            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            nx = nx, ny = ny, figsize = figsize, save_dir = save_dir,
+            activate_gl = activate_gl, display_fig = display_fig)
+    elseif ds isa HealpixCubeDataset
+        return manta(ds;
+            cmap = cmap === :viridis ? :inferno : cmap,
+            vmin = vmin, vmax = vmax, invert = invert, scale = scale,
+            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            nx = nx, ny = ny, figsize = figsize, save_dir = save_dir,
+            activate_gl = activate_gl, display_fig = display_fig,
+            rgb = rgb)
+    elseif ds isa CubeDataset
+        return manta(ds;
+            cmap = cmap, vmin = vmin, vmax = vmax, invert = invert,
+            figsize = figsize, save_dir = save_dir,
+            activate_gl = activate_gl, display_fig = display_fig,
+            settings_path = settings_path,
+            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            rgb = rgb)
+    elseif ds isa ImageDataset
+        return manta(ds;
+            cmap = cmap, vmin = vmin, vmax = vmax, invert = invert,
+            hist_mode = hist_mode, hist_bins = hist_bins, hist_xlimits = hist_xlimits,
+            scale = scale, figsize = figsize, save_dir = save_dir,
+            activate_gl = activate_gl, display_fig = display_fig)
+    else
+        return manta(ds; activate_gl = activate_gl, display_fig = display_fig)
     end
-
-    # On lit l'image primaire UNE fois : sert à la fois pour détecter un
-    # cube HEALPix-PPV 2D et pour les cubes 3D classiques. La détection
-    # HEALPix-image-1D (BinTable) reste basée sur les headers.
-    header = nothing
-    cube = try
-        FITS(filepath) do f
-            header = try
-                read_header(f[1])
-            catch
-                nothing
-            end
-            read(f[1])
-        end
-    catch e
-        nothing  # primary HDU peut être vide pour HEALPix BinTable → on tolère
-    end
-
-    # ---- Dispatch HEALPix PPV cube (2D, une dim = 12·nside²) ----
-    # Important : tester AVANT `is_healpix_fits` car nos cubes embarquent
-    # `PIXTYPE=HEALPIX` dans le header primaire pour transporter le WCS,
-    # ce qui ferait sinon basculer sur le viewer carte 1D.
-    if cube !== nothing && ndims(cube) == 2
-        if rgb
-            @info "Detected explicit RGB HEALPix pixels → using manta_healpix"
-            return manta_healpix(cube;
-                title=String(replace(basename(filepath), r"\.fits(\.gz)?$" => "")),
-                nx=nx, ny=ny, figsize=figsize,
-                activate_gl=activate_gl, display_fig=display_fig)
-        end
-        s = size(cube)
-        if valid_healpix_npix(s[1]) > 0 || valid_healpix_npix(s[2]) > 0
-            @info "Detected HEALPix PPV cube → using manta_healpix_cube"
-            return manta_healpix_cube(filepath;
-                cmap=(cmap === :viridis ? :inferno : cmap),
-                vmin=vmin, vmax=vmax, invert=invert, scale=scale,
-                v0=v0, dv=dv, vunit=vunit,
-                nx=nx, ny=ny,
-                figsize=figsize, save_dir=save_dir,
-                activate_gl=activate_gl, display_fig=display_fig)
-        end
-    end
-
-    # ---- Dispatch carte HEALPix 1D (BinTable) ----
-    if is_healpix_fits(filepath)
-        @info "Detected HEALPix map → using manta_healpix"
-        return manta_healpix(filepath;
-            cmap=(cmap === :viridis ? :inferno : cmap),
-            vmin=vmin, vmax=vmax, invert=invert,
-            scale=scale, column=column, nx=nx, ny=ny,
-            figsize=figsize, save_dir=save_dir,
-            activate_gl=activate_gl, display_fig=display_fig)
-    end
-
-    if cube === nothing
-        throw(ArgumentError("Failed to read primary HDU of $(abspath(filepath))."))
-    end
-
-    if rgb
-        return manta(
-            as_rgb_image(cube);
-            title=String(replace(basename(filepath), r"\.fits(\.gz)?$" => "")),
-            figsize=figsize,
-            activate_gl=activate_gl,
-            display_fig=display_fig,
-        )
-    end
-
-    if ndims(cube) == 2
-        return manta(
-            Float32.(cube);
-            title=String(replace(basename(filepath), r"\.fits(\.gz)?$" => "")),
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            invert=invert,
-            scale=scale,
-            figsize=figsize,
-            save_dir=save_dir,
-            activate_gl=activate_gl,
-            display_fig=display_fig,
-            unit_label=data_unit_label(header; fallback = "value"),
-        )
-    end
-
-    if ndims(cube) != 3
-        throw(ArgumentError("Expected a 3D FITS cube, got ndims=$(ndims(cube)) and size=$(size(cube))."))
-    end
-
-    # 3D FITS cube → build a CubeDataset and hand off to the cube viewer.
-    # The header and original FITS path are stashed in `metadata` so the
-    # viewer can reuse them for comparison-FITS path resolution, FITS
-    # product export, and default save filenames.
-    cube_data = as_float32(cube)
-    wcs       = header === nothing ? SimpleWCSAxis[] : read_simple_wcs(header, 3)
-    unit_lbl  = data_unit_label(header; fallback = "value")
-    axis_lbls = String[wcs_axis_label(wcs, d; fallback = "axis $d") for d in 1:3]
-    src_id    = String(replace(basename(filepath), r"\.fits(\.gz)?$"i => ""))
-    metadata  = Dict{Symbol,Any}(:fits_path => abspath(filepath))
-    if header !== nothing
-        metadata[:fits_header] = header
-    end
-    ds = CubeDataset(
-        cube_data;
-        axis_labels = axis_lbls,
-        wcs         = wcs,
-        unit_label  = unit_lbl,
-        source_id   = src_id,
-        metadata    = metadata,
-    )
-    return _view_cube(
-        ds;
-        cmap = cmap,
-        vmin = vmin,
-        vmax = vmax,
-        invert = invert,
-        figsize = figsize,
-        save_dir = save_dir,
-        activate_gl = activate_gl,
-        display_fig = display_fig,
-        settings_path = settings_path,
-    )
 end
 
 function manta(
@@ -239,6 +154,9 @@ function manta(
     vmax = nothing,
     invert::Bool = false,
     scale::Symbol = :lin,
+    hist_mode::Symbol = :bars,
+    hist_bins::Int = 64,
+    hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
     save_dir::Union{Nothing,AbstractString} = nothing,
     activate_gl::Bool = true,
@@ -280,11 +198,24 @@ function manta(
     clims_safe = lift(clims_obs) do (lo, hi)
         (isfinite(lo) && isfinite(hi) && lo != hi) ? (lo, hi) : (0f0, 1f0)
     end
-    hist_pair_obs = lift(img_disp, clims_safe) do im, lim
-        histogram_counts(im; bins = 64, limits = lim)
+    hist_mode_obs = Observable(normalize_histogram_mode(hist_mode))
+    hist_bins_obs = Observable(clamp(hist_bins, 4, 512))
+    hist_xlimits_manual = Observable(hist_xlimits !== nothing)
+    hist_xlimits_manual_value = Observable(hist_xlimits === nothing ?
+        (0f0, 1f0) :
+        parse_histogram_xlimits(string(first(hist_xlimits)), string(last(hist_xlimits)))[3])
+    hist_limits_obs = lift(hist_xlimits_manual, hist_xlimits_manual_value, clims_safe) do manual, xlim, clim
+        manual ? xlim : clim
     end
-    hist_x_obs = lift(p -> p[1], hist_pair_obs)
-    hist_y_obs = lift(p -> p[2], hist_pair_obs)
+    hist_pair_obs = lift(img_disp, hist_limits_obs, hist_bins_obs, hist_mode_obs) do im, lim, bins, mode
+        histogram_profile(im; bins = bins, limits = lim, mode = mode)
+    end
+    hist_x_obs = lift(p -> p.x, hist_pair_obs)
+    hist_y_obs = lift(p -> p.y, hist_pair_obs)
+    hist_width_obs = lift(p -> p.width, hist_pair_obs)
+    hist_bars_visible = lift(m -> m === :bars, hist_mode_obs)
+    hist_kde_visible = lift(m -> m === :kde, hist_mode_obs)
+    hist_ylabel_obs = lift(histogram_ylabel, hist_mode_obs)
 
     fig_bg_panels = RGBf(0.97, 0.975, 0.985)
     activate_gl ? GLMakie.activate!() : CairoMakie.activate!()
@@ -326,10 +257,11 @@ function manta(
         grid[2, 1];
         title = L"\text{Image histogram}",
         xlabel = unit_label_tex,
-        ylabel = L"\text{count}",
+        ylabel = hist_ylabel_obs,
         height = 130,
     )
-    lines!(ax_hist, hist_x_obs, hist_y_obs; color = ui_accent, linewidth = 1.6)
+    barplot!(ax_hist, hist_x_obs, hist_y_obs; width = hist_width_obs, color = (ui_accent, 0.44), strokecolor = ui_accent, strokewidth = 0.3, visible = hist_bars_visible)
+    lines!(ax_hist, hist_x_obs, hist_y_obs; color = ui_accent, linewidth = 1.8, visible = hist_kde_visible)
     vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe); color = (ui_text_muted, 0.65), linewidth = 1.1, linestyle = :dash)
 
     ctrl = grid[3, 1] = GridLayout(; alignmode = Outside())
@@ -344,6 +276,13 @@ function manta(
     p1_btn = Button(ctrl[1, 9]; label = "p1-p99", width = 92, height = 32)
     p5_btn = Button(ctrl[1, 10]; label = "p5-p95", width = 92, height = 32)
     save_btn = Button(ctrl[1, 11]; label = "Save PNG", width = 108, height = 32)
+    Label(ctrl[2, 1], text = "Histogram", halign = :left, tellwidth = false, fontsize = 14, color = ui_text_muted)
+    hist_mode_menu = Menu(ctrl[2, 2]; options = ["bars", "kde"], prompt = String(hist_mode_obs[]), width = 96)
+    hist_bins_box = Textbox(ctrl[2, 3]; placeholder = "bins", width = 82, height = 32)
+    hist_xmin_box = Textbox(ctrl[2, 4]; placeholder = "x min", width = 100, height = 32)
+    hist_xmax_box = Textbox(ctrl[2, 5]; placeholder = "x max", width = 100, height = 32)
+    hist_apply_btn = Button(ctrl[2, 6]; label = "Apply", width = 82, height = 32)
+    hist_auto_btn = Button(ctrl[2, 7]; label = "Auto x", width = 82, height = 32)
     ui_status = Observable(" ")
     grid[4, 1] = Label(grid[4, 1]; text = ui_status, halign = :left, tellwidth = false)
 
@@ -362,8 +301,20 @@ function manta(
         btn.padding[] = (12, 12, 7, 7)
         btn
     end
-    foreach(style_button_local!, (apply_btn, auto_btn, p1_btn, p5_btn, save_btn))
+    foreach(style_button_local!, (apply_btn, auto_btn, p1_btn, p5_btn, save_btn, hist_apply_btn, hist_auto_btn))
     invert_chk.checked[] = invert
+    set_box_text_local!(tb, s::AbstractString) = begin
+        str = String(s)
+        tb.displayed_string[] = str
+        tb.stored_string[] = str
+        nothing
+    end
+    set_box_text_local!(hist_bins_box, string(hist_bins_obs[]))
+    if hist_xlimits_manual[]
+        lo, hi = hist_xlimits_manual_value[]
+        set_box_text_local!(hist_xmin_box, string(lo))
+        set_box_text_local!(hist_xmax_box, string(hi))
+    end
 
     set_status!(msg::AbstractString) = (ui_status[] = String(msg); nothing)
     set_box_text!(tb, s::AbstractString) = begin
@@ -413,6 +364,48 @@ function manta(
     end
     on(p1_btn.clicks) do _; apply_percentile_clims!(1, 99); end
     on(p5_btn.clicks) do _; apply_percentile_clims!(5, 95); end
+    on(hist_mode_menu.selection) do sel
+        sel === nothing && return
+        hist_mode_obs[] = normalize_histogram_mode(sel)
+        set_status!("Histogram mode set to $(String(hist_mode_obs[])).")
+    end
+    on(hist_apply_btn.clicks) do _
+        ok_bins, bins, bins_msg = parse_histogram_bins(get_box_str(hist_bins_box); fallback = hist_bins_obs[])
+        ok_x, manual_x, xlim, x_msg = parse_histogram_xlimits(
+            get_box_str(hist_xmin_box),
+            get_box_str(hist_xmax_box);
+            fallback = hist_xlimits_manual_value[],
+        )
+        if !ok_bins
+            set_status!(bins_msg)
+            return
+        end
+        if !ok_x
+            set_status!(x_msg)
+            return
+        end
+        hist_bins_obs[] = bins
+        hist_xlimits_manual_value[] = xlim
+        hist_xlimits_manual[] = manual_x
+        set_box_text!(hist_bins_box, string(bins))
+        if manual_x
+            set_box_text!(hist_xmin_box, string(first(xlim)))
+            set_box_text!(hist_xmax_box, string(last(xlim)))
+        else
+            set_box_text!(hist_xmin_box, "")
+            set_box_text!(hist_xmax_box, "")
+        end
+        set_status!("$(bins_msg) $(x_msg)")
+    end
+    on(hist_auto_btn.clicks) do _
+        hist_xlimits_manual[] = false
+        set_box_text!(hist_xmin_box, "")
+        set_box_text!(hist_xmax_box, "")
+        set_status!("Automatic histogram x-axis enabled.")
+    end
+    on(hist_limits_obs) do lim
+        xlims!(ax_hist, Float32(first(lim)), Float32(last(lim)))
+    end
 
     save_root = if save_dir === nothing
         d = joinpath(homedir(), "Desktop")
@@ -522,11 +515,9 @@ end
 # ----------------------------------------------------------------------------
 # Dataset-aware dispatch.
 #
-# These methods turn `manta(x)` into "load_dataset(x) → view it" for any input
-# that isn't already a path, a 2D array or an RGB array (those keep their
-# original methods above). `CubeDataset` is handled by `_view_cube` (alias
-# `view_cube`) from `views/CubeView.jl`; HEALPix datasets currently still
-# round-trip via their FITS path when one is available in metadata.
+# These methods are the view half of "load_dataset(x) -> view it". Paths and
+# in-memory 3D arrays now enter through `load_dataset`; 2D scalar images and
+# RGB arrays keep their direct lightweight viewers above.
 # ----------------------------------------------------------------------------
 
 """
@@ -542,29 +533,72 @@ function manta(ds::ImageDataset; kwargs...)
 end
 
 function manta(ds::HealpixMapDataset; kwargs...)
-    fits_path = get(ds.metadata, :fits_path, nothing)
-    if fits_path isa AbstractString && isfile(fits_path)
-        return manta_healpix(String(fits_path); kwargs...)
-    end
-    throw(ErrorException(
-        "MANTA: viewing an in-memory HealpixMapDataset is not yet wired up. " *
-        "Load via `manta(\"map.fits\")` so the file is available to the viewer, " *
-        "or wait for Phase 2 which adds `view_healpix_map(::HealpixMapDataset)`."))
+    return _view_healpix_map(ds; kwargs...)
 end
 
-function manta(ds::HealpixCubeDataset; kwargs...)
-    fits_path = get(ds.metadata, :fits_path, nothing)
-    if fits_path isa AbstractString && isfile(fits_path)
-        return manta_healpix_cube(String(fits_path);
-            v0 = ds.v0, dv = ds.dv, vunit = ds.vunit, kwargs...)
+function manta(
+    ds::HealpixCubeDataset;
+    rgb::Bool = false,
+    cmap::Symbol = :inferno,
+    vmin = nothing,
+    vmax = nothing,
+    invert::Bool = false,
+    scale::Symbol = :lin,
+    nx::Int = 1200,
+    ny::Int = 600,
+    figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
+    save_dir::Union{Nothing,AbstractString} = nothing,
+    activate_gl::Bool = true,
+    display_fig::Bool = true,
+    hist_mode::Symbol = :bars,
+    hist_bins::Int = 64,
+    hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+)
+    if rgb
+        return manta_healpix(as_rgb_pixels(ds.data);
+            title = ds.source_id,
+            nx = nx, ny = ny, figsize = figsize,
+            activate_gl = activate_gl, display_fig = display_fig)
     end
-    throw(ErrorException(
-        "MANTA: viewing an in-memory HealpixCubeDataset is not yet wired up. " *
-        "Load via `manta(\"cube.fits\")` so the file is available to the viewer."))
+    return _view_healpix_cube(ds;
+        cmap = cmap, vmin = vmin, vmax = vmax, invert = invert,
+        scale = scale, nx = nx, ny = ny, figsize = figsize,
+        save_dir = save_dir, activate_gl = activate_gl,
+        display_fig = display_fig,
+        hist_mode = hist_mode, hist_bins = hist_bins,
+        hist_xlimits = hist_xlimits)
 end
 
-function manta(ds::CubeDataset; kwargs...)
-    return _view_cube(ds; kwargs...)
+function manta(
+    ds::CubeDataset;
+    rgb::Bool = false,
+    cmap::Symbol = :viridis,
+    vmin = nothing,
+    vmax = nothing,
+    invert::Bool = false,
+    figsize::Union{Nothing,Tuple{Int,Int}} = nothing,
+    save_dir::Union{Nothing,AbstractString} = nothing,
+    activate_gl::Bool = true,
+    display_fig::Bool = true,
+    settings_path::Union{Nothing,AbstractString} = nothing,
+    hist_mode::Symbol = :bars,
+    hist_bins::Int = 64,
+    hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+)
+    if rgb
+        return manta(as_rgb_image(ds.data);
+            title = ds.source_id,
+            figsize = figsize,
+            activate_gl = activate_gl,
+            display_fig = display_fig)
+    end
+    return _view_cube(ds;
+        cmap = cmap, vmin = vmin, vmax = vmax, invert = invert,
+        figsize = figsize, save_dir = save_dir,
+        activate_gl = activate_gl, display_fig = display_fig,
+        settings_path = settings_path,
+        hist_mode = hist_mode, hist_bins = hist_bins,
+        hist_xlimits = hist_xlimits)
 end
 
 function manta(ds::VectorDataset; kwargs...)

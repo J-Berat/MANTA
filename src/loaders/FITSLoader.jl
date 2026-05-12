@@ -69,7 +69,7 @@ function load_fits(
     end
     if ndims(raw) != 3
         throw(ArgumentError(
-            "MANTA: expected a 2D image or 3D FITS cube in $(abspath(filepath)), " *
+            "MANTA: Expected a 3D FITS cube or 2D image in $(abspath(filepath)), " *
             "got ndims=$(ndims(raw)) and size=$(size(raw))."))
     end
     return _load_cube_fits(filepath, raw, header)
