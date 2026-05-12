@@ -274,8 +274,43 @@ end
 @testset "helpers: ui" begin
     # explicit override
     @test MANTA._pick_fig_size((111, 222)) == (111, 222)
-    # default when no explicit size is provided
-    @test MANTA._pick_fig_size(nothing) == (1500, 900)
+
+    # default when no explicit size is provided: contract is now
+    #   - returns a (w, h) tuple of `Int`,
+    #   - is at least `MANTA._MIN_FIG_SIZE` on both axes,
+    #   - falls back to `MANTA._DEFAULT_FIG_SIZE` when no screen can be
+    #     detected (headless CI, no DISPLAY, etc.).
+    sz = MANTA._pick_fig_size(nothing)
+    @test sz isa Tuple{Int,Int}
+    @test sz[1] >= MANTA._MIN_FIG_SIZE[1]
+    @test sz[2] >= MANTA._MIN_FIG_SIZE[2]
+
+    # Force-headless code path: clear the cache, blank the env overrides and
+    # blank DISPLAY so the GLFW branch is skipped → must yield the default.
+    MANTA._SCREEN_SIZE_CACHE[] = nothing
+    MANTA._SCREEN_SIZE_PROBED[] = false
+    saved_w = get(ENV, "MANTA_SCREEN_W", nothing)
+    saved_h = get(ENV, "MANTA_SCREEN_H", nothing)
+    saved_display = get(ENV, "DISPLAY", nothing)
+    saved_wayland = get(ENV, "WAYLAND_DISPLAY", nothing)
+    ENV["MANTA_SCREEN_W"] = ""
+    ENV["MANTA_SCREEN_H"] = ""
+    if Sys.islinux()
+        ENV["DISPLAY"] = ""
+        ENV["WAYLAND_DISPLAY"] = ""
+    end
+    try
+        if Sys.islinux()
+            @test MANTA._pick_fig_size(nothing) == MANTA._DEFAULT_FIG_SIZE
+        end
+    finally
+        saved_w === nothing ? delete!(ENV, "MANTA_SCREEN_W") : (ENV["MANTA_SCREEN_W"] = saved_w)
+        saved_h === nothing ? delete!(ENV, "MANTA_SCREEN_H") : (ENV["MANTA_SCREEN_H"] = saved_h)
+        saved_display === nothing ? delete!(ENV, "DISPLAY") : (ENV["DISPLAY"] = saved_display)
+        saved_wayland === nothing ? delete!(ENV, "WAYLAND_DISPLAY") : (ENV["WAYLAND_DISPLAY"] = saved_wayland)
+        MANTA._SCREEN_SIZE_CACHE[] = nothing
+        MANTA._SCREEN_SIZE_PROBED[] = false
+    end
 end
 
 @testset "helpers: validation" begin

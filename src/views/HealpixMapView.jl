@@ -216,7 +216,8 @@ function _view_healpix_map(
         title = L"\text{Visible map histogram}",
         xlabel = unit_label_tex,
         ylabel = hist_ylabel_obs,
-        height = 120,
+        # height is governed by `rowsize!(main_grid, 4, ...)` below — no
+        # hard-coded value here (cf. CLAUDE.md / anti-patterns).
         xtickformat = _latex_tick_formatter,
         ytickformat = _latex_tick_formatter,
     )

@@ -50,6 +50,7 @@ using TOML
 using Statistics: quantile, mean
 using ImageFiltering
 using FFTW: fft, fftshift
+import GLFW
 
 ############################
 # Filtering
@@ -1188,13 +1189,119 @@ end
 # Window size
 ############################
 
+# Defaults used when no display is available (CI / headless / Docker).
+const _DEFAULT_FIG_SIZE   = (1500, 900)
+# Minimum we still consider "usable" so we never collapse below this.
+const _MIN_FIG_SIZE       = (1100, 720)
+# Maximum fraction of the screen we want a default figure to occupy. Tuned to
+# leave room for the OS chrome (title bar, dock/taskbar) on small laptops.
+const _FIG_SCREEN_FRAC_W  = 0.92
+const _FIG_SCREEN_FRAC_H  = 0.88
+
+# Cache so repeated calls (panels, dual view, …) don't hit GLFW each time and
+# so headless runs (`activate_gl=false`) never even try to initialize it.
+const _SCREEN_SIZE_CACHE = Ref{Union{Nothing,Tuple{Int,Int}}}(nothing)
+const _SCREEN_SIZE_PROBED = Ref(false)
+
+"""
+    _detect_screen_size() -> Union{Nothing,Tuple{Int,Int}}
+
+Best-effort query of the primary monitor work area (px). Resolution order:
+
+  1. environment override `MANTA_SCREEN_W` / `MANTA_SCREEN_H` (useful for
+     Docker / VNC where GLFW often misreports the workarea),
+  2. early bail-out on Linux when neither `DISPLAY` nor `WAYLAND_DISPLAY` is
+     set (avoids initializing GLFW in headless containers),
+  3. `GLFW.GetMonitorWorkarea` on the primary monitor, falling back to the
+     full video-mode size if the workarea API isn't available.
+
+Returns `nothing` if no size could be obtained — callers must handle this
+gracefully (see `_pick_fig_size` which falls back to `_DEFAULT_FIG_SIZE`).
+
+Result is cached: the first call probes, subsequent calls reuse the value.
+"""
+function _detect_screen_size()::Union{Nothing,Tuple{Int,Int}}
+    _SCREEN_SIZE_PROBED[] && return _SCREEN_SIZE_CACHE[]
+    _SCREEN_SIZE_PROBED[] = true
+
+    # Environment override (useful for Docker / VNC where GLFW reports wrong values).
+    env_w = tryparse(Int, get(ENV, "MANTA_SCREEN_W", ""))
+    env_h = tryparse(Int, get(ENV, "MANTA_SCREEN_H", ""))
+    if env_w !== nothing && env_h !== nothing && env_w > 0 && env_h > 0
+        _SCREEN_SIZE_CACHE[] = (env_w, env_h)
+        return _SCREEN_SIZE_CACHE[]
+    end
+
+    # On Linux without DISPLAY there is no usable screen; don't probe GLFW
+    # at all so we don't risk an Init() error in headless containers.
+    if Sys.islinux() && isempty(get(ENV, "DISPLAY", "")) && isempty(get(ENV, "WAYLAND_DISPLAY", ""))
+        _SCREEN_SIZE_CACHE[] = nothing
+        return nothing
+    end
+
+    # GLFW probe. Wrapped in try/catch because:
+    #   - GLFW may already be initialized by GLMakie (Init is idempotent),
+    #   - the platform may not expose a primary monitor,
+    #   - the workarea API may not be available on some drivers.
+    val = try
+        try; GLFW.Init(); catch; end
+        mon = GLFW.GetPrimaryMonitor()
+        # On some bindings the null monitor has a zero handle. Treat that as
+        # "no monitor".
+        if mon === nothing || (hasproperty(mon, :handle) && mon.handle == C_NULL)
+            nothing
+        else
+            # GetMonitorWorkarea returns (x, y, w, h) of the usable area
+            # (i.e. screen minus dock / taskbar / menu bar). Falls back to
+            # the video mode if the workarea entry-point is missing.
+            wa = try
+                GLFW.GetMonitorWorkarea(mon)
+            catch
+                nothing
+            end
+            if wa !== nothing
+                (Int(wa[3]), Int(wa[4]))
+            else
+                vm = GLFW.GetVideoMode(mon)
+                (Int(vm.width), Int(vm.height))
+            end
+        end
+    catch
+        nothing
+    end
+
+    _SCREEN_SIZE_CACHE[] = val
+    return val
+end
+
 """
     _pick_fig_size(sizeopt) -> (w::Int, h::Int)
 
-Use an explicit size when provided; otherwise, return a balanced fallback `(1500, 900)`.
+Resolve the figure size for a viewer:
+
+  * if `sizeopt` is a `(w, h)` tuple it is used verbatim,
+  * otherwise the primary monitor work area is queried and the result is
+    capped to `_FIG_SCREEN_FRAC_W / _FIG_SCREEN_FRAC_H` of that area,
+  * if no screen can be detected (headless / CI / Docker), the conservative
+    `_DEFAULT_FIG_SIZE` fallback is returned.
+
+In all cases the output is clamped above `_MIN_FIG_SIZE` so a tiny screen
+doesn't yield an unusable layout.
 """
 @inline function _pick_fig_size(sizeopt)
-    sizeopt !== nothing ? (Int(sizeopt[1]), Int(sizeopt[2])) : (1500, 900)
+    if sizeopt !== nothing
+        return (Int(sizeopt[1]), Int(sizeopt[2]))
+    end
+    scr = _detect_screen_size()
+    if scr === nothing
+        return _DEFAULT_FIG_SIZE
+    end
+    sw, sh = scr
+    w = round(Int, sw * _FIG_SCREEN_FRAC_W)
+    h = round(Int, sh * _FIG_SCREEN_FRAC_H)
+    w = max(w, _MIN_FIG_SIZE[1])
+    h = max(h, _MIN_FIG_SIZE[2])
+    return (w, h)
 end
 
 """
