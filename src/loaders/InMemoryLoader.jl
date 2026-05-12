@@ -1,17 +1,25 @@
 # path: src/loaders/InMemoryLoader.jl
 #
 # Convert in-memory inputs (`AbstractVector`, `AbstractMatrix`, 3D arrays,
-# NamedTuple/Dict of arrays, `Healpix.HealpixMap`) into AbstractCartaDataset.
+# NamedTuple/Dict of arrays, `Healpix.HealpixMap`) into AbstractMANTADataset.
 
-# Stable per-session id derived from concrete type + shape (used for the
-# settings TOML filename when the user provides no source_id).
-function _inmem_source_id(x)
-    h = hash((typeof(x), size(x)))
-    return "inmem_" * string(h; base = 16)
+using SHA
+
+"""
+    stable_source_id(x) -> String
+
+Deterministic, content-shape-aware identifier used as a fallback when the
+caller does not provide one. Two calls with arrays of the same concrete type
+and the same size will produce the same id, which is what the persistent
+viewer-settings file expects.
+"""
+function stable_source_id(x)
+    s = string(typeof(x), "_", size(x))
+    return "inmem_" * bytes2hex(sha1(s))[1:12]
 end
 
-# Already-a-dataset → return as-is. Allows `carta(ds)` to work uniformly.
-_dataset_from(ds::AbstractCartaDataset; _kw...) = ds
+# Already-a-dataset → return as-is. Allows `manta(ds)` to work uniformly.
+_dataset_from(ds::AbstractMANTADataset; _kw...) = ds
 
 function _dataset_from(
     v::AbstractVector{T};
@@ -19,12 +27,15 @@ function _dataset_from(
     wcs::Union{Nothing,SimpleWCSAxis} = nothing,
     unit_label::AbstractString = "value",
     source_id::Union{Nothing,AbstractString} = nothing,
+    label::Union{Nothing,AbstractString} = nothing,
     metadata::AbstractDict = Dict{Symbol,Any}(),
 ) where {T<:Real}
-    sid = source_id === nothing ? _inmem_source_id(v) : String(source_id)
+    sid = source_id === nothing ? stable_source_id(v) : String(source_id)
+    md = Dict{Symbol,Any}(metadata)
+    label === nothing || (md[:label] = String(label))
     return VectorDataset(v;
         axis_label = axis_label, wcs = wcs, unit_label = unit_label,
-        source_id = sid, metadata = metadata)
+        source_id = sid, metadata = md)
 end
 
 function _dataset_from(
@@ -33,12 +44,15 @@ function _dataset_from(
     wcs::AbstractVector{SimpleWCSAxis} = SimpleWCSAxis[],
     unit_label::AbstractString = "value",
     source_id::Union{Nothing,AbstractString} = nothing,
+    label::Union{Nothing,AbstractString} = nothing,
     metadata::AbstractDict = Dict{Symbol,Any}(),
 ) where {T<:Real}
-    sid = source_id === nothing ? _inmem_source_id(M) : String(source_id)
+    sid = source_id === nothing ? stable_source_id(M) : String(source_id)
+    md = Dict{Symbol,Any}(metadata)
+    label === nothing || (md[:label] = String(label))
     return ImageDataset(M;
         axis_labels = axis_labels, wcs = wcs, unit_label = unit_label,
-        source_id = sid, metadata = metadata)
+        source_id = sid, metadata = md)
 end
 
 function _dataset_from(
@@ -47,12 +61,23 @@ function _dataset_from(
     wcs::AbstractVector{SimpleWCSAxis} = SimpleWCSAxis[],
     unit_label::AbstractString = "value",
     source_id::Union{Nothing,AbstractString} = nothing,
+    label::Union{Nothing,AbstractString} = nothing,
     metadata::AbstractDict = Dict{Symbol,Any}(),
 ) where {T<:Real}
-    sid = source_id === nothing ? _inmem_source_id(A) : String(source_id)
+    sid = source_id === nothing ? stable_source_id(A) : String(source_id)
+    md = Dict{Symbol,Any}(metadata)
+    label === nothing || (md[:label] = String(label))
     return CubeDataset(A;
         axis_labels = axis_labels, wcs = wcs, unit_label = unit_label,
-        source_id = sid, metadata = metadata)
+        source_id = sid, metadata = md)
+end
+
+# Catch-all for unsupported ndims so users get a clear message rather than
+# a method-error trace.
+function _dataset_from(A::AbstractArray; kwargs...)
+    throw(ArgumentError(
+        "MANTA: cannot wrap array with ndims=$(ndims(A)) and size=$(size(A)). " *
+        "Supported: 1D vector, 2D image, 3D cube."))
 end
 
 # NamedTuple / Dict → MultiChannelDataset. Builds a per-channel inner dataset
@@ -64,7 +89,7 @@ function _dataset_from(
     metadata::AbstractDict = Dict{Symbol,Any}(),
     inner_kwargs...
 )
-    isempty(nt) && throw(ArgumentError("carta: empty NamedTuple has no channels"))
+    isempty(nt) && throw(ArgumentError("MANTA: empty NamedTuple has no channels"))
     return _build_multichannel(
         Dict{Symbol,Any}(k => v for (k, v) in pairs(nt));
         source_id = source_id, default_channel = default_channel,
@@ -79,7 +104,7 @@ function _dataset_from(
     metadata::AbstractDict = Dict{Symbol,Any}(),
     inner_kwargs...
 )
-    isempty(d) && throw(ArgumentError("carta: empty Dict has no channels"))
+    isempty(d) && throw(ArgumentError("MANTA: empty Dict has no channels"))
     sym_dict = Dict{Symbol,Any}()
     for (k, v) in pairs(d)
         sym_dict[Symbol(k)] = v
@@ -98,9 +123,9 @@ function _build_multichannel(
     metadata::AbstractDict = Dict{Symbol,Any}(),
     inner_kwargs...
 )
-    inner = Dict{Symbol,AbstractCartaDataset}()
+    inner = Dict{Symbol,AbstractMANTADataset}()
     for (k, v) in sym_dict
-        if v isa AbstractCartaDataset
+        if v isa AbstractMANTADataset
             inner[k] = v
         else
             inner[k] = _dataset_from(v;
@@ -111,9 +136,10 @@ function _build_multichannel(
     sid = if source_id !== nothing
         String(source_id)
     else
-        # Hash of channel keys + shape of the first dataset
-        first_ds = inner[first(sort!(collect(keys(inner))))]
-        "inmem_mc_" * string(hash((sort!(collect(keys(inner))), size(first_ds.data))); base = 16)
+        keys_sorted = sort!(collect(keys(inner)))
+        first_ds = inner[first(keys_sorted)]
+        digest = bytes2hex(sha1(string(keys_sorted, "_", size(first_ds.data))))[1:12]
+        "inmem_mc_" * digest
     end
     return MultiChannelDataset(inner;
         default_channel = default_channel,
@@ -127,10 +153,17 @@ function _dataset_from(
     column::Int = 1,
     unit_label::AbstractString = "value",
     source_id::Union{Nothing,AbstractString} = nothing,
+    label::Union{Nothing,AbstractString} = nothing,
     metadata::AbstractDict = Dict{Symbol,Any}(),
 )
-    sid = source_id === nothing ? "inmem_healpix_" * string(hash(size(m.pixels)); base = 16) : String(source_id)
+    sid = if source_id === nothing
+        "inmem_healpix_" * bytes2hex(sha1(string(size(m.pixels))))[1:12]
+    else
+        String(source_id)
+    end
+    md = Dict{Symbol,Any}(metadata)
+    label === nothing || (md[:label] = String(label))
     return HealpixMapDataset(m;
         column = column, unit_label = unit_label,
-        source_id = sid, metadata = metadata)
+        source_id = sid, metadata = md)
 end

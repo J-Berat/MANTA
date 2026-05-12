@@ -9,12 +9,16 @@
 #
 # Reuses `SimpleWCSAxis` from `helpers/Helpers.jl` (do not duplicate).
 
-abstract type AbstractCartaDataset end
+abstract type AbstractMANTADataset end
+
+# Backwards-compatibility alias for any external code still using the
+# previous name. New code should prefer `AbstractMANTADataset`.
+const AbstractCartaDataset = AbstractMANTADataset
 
 const _EMPTY_WCS = SimpleWCSAxis[]
 
 # ---------- VectorDataset (1D line plot) ----------
-struct VectorDataset{T<:Real} <: AbstractCartaDataset
+struct VectorDataset{T<:Real} <: AbstractMANTADataset
     data::AbstractVector{T}
     axis_label::String
     wcs::Union{Nothing,SimpleWCSAxis}
@@ -42,7 +46,7 @@ function VectorDataset(
 end
 
 # ---------- ImageDataset (2D heatmap) ----------
-struct ImageDataset{T<:Real} <: AbstractCartaDataset
+struct ImageDataset{T<:Real} <: AbstractMANTADataset
     data::AbstractMatrix{T}
     axis_labels::Vector{String}
     wcs::Vector{SimpleWCSAxis}
@@ -72,7 +76,7 @@ function ImageDataset(
 end
 
 # ---------- CubeDataset (3D cube) ----------
-struct CubeDataset{T<:Real} <: AbstractCartaDataset
+struct CubeDataset{T<:Real} <: AbstractMANTADataset
     data::AbstractArray{T,3}
     axis_labels::Vector{String}
     wcs::Vector{SimpleWCSAxis}
@@ -102,8 +106,8 @@ function CubeDataset(
 end
 
 # ---------- MultiChannelDataset (NamedTuple/Dict of homogeneous datasets) ----------
-struct MultiChannelDataset <: AbstractCartaDataset
-    channels::Dict{Symbol,AbstractCartaDataset}
+struct MultiChannelDataset <: AbstractMANTADataset
+    channels::Dict{Symbol,AbstractMANTADataset}
     kind::Symbol                  # :image | :cube | :vector
     default_channel::Symbol
     source_id::String
@@ -111,7 +115,7 @@ struct MultiChannelDataset <: AbstractCartaDataset
 end
 
 function MultiChannelDataset(
-    channels::AbstractDict{Symbol,<:AbstractCartaDataset};
+    channels::AbstractDict{Symbol,<:AbstractMANTADataset};
     default_channel::Union{Nothing,Symbol} = nothing,
     source_id::AbstractString = "multichannel",
     metadata::AbstractDict = Dict{Symbol,Any}(),
@@ -143,7 +147,7 @@ function MultiChannelDataset(
     haskey(channels, chosen) || throw(ArgumentError(
         "default_channel $(chosen) not in channels $(keys_sorted)"))
     return MultiChannelDataset(
-        Dict{Symbol,AbstractCartaDataset}(channels),
+        Dict{Symbol,AbstractMANTADataset}(channels),
         kind,
         chosen,
         String(source_id),
@@ -152,7 +156,7 @@ function MultiChannelDataset(
 end
 
 # ---------- HealpixMapDataset (1D HEALPix map) ----------
-struct HealpixMapDataset <: AbstractCartaDataset
+struct HealpixMapDataset <: AbstractMANTADataset
     map::Healpix.HealpixMap
     column::Int
     unit_label::String
@@ -180,7 +184,7 @@ end
 const HealpixDataset = HealpixMapDataset
 
 # ---------- HealpixCubeDataset (npix x nv) ----------
-struct HealpixCubeDataset{T<:Real} <: AbstractCartaDataset
+struct HealpixCubeDataset{T<:Real} <: AbstractMANTADataset
     data::AbstractMatrix{T}        # already oriented (npix, nv)
     nside::Int
     nv::Int

@@ -67,27 +67,63 @@ speed    = @. sqrt(U^2 + V^2 + W^2)
 
 # --- Visualization: RGB composite + 3 separate channels ---
 latex_fmt(vals) = [L"%$(round(v/π, digits=2))\pi" for v in vals]
+axis_render_height(axis) = lift(axis.scene.viewport) do rect
+    max(1, rect.widths[2])
+end
 
-fig = Figure(size=(1100, 850))
+function render_size()
+    if length(ARGS) >= 2
+        return (parse(Int, ARGS[1]), parse(Int, ARGS[2]))
+    end
+    w = parse(Int, get(ENV, "FIG_W", "1400"))
+    h = parse(Int, get(ENV, "FIG_H", "900"))
+    return (w, h)
+end
+
+fig_w, fig_h = render_size()
+usable_h = max(420, fig_h - 90)
+top_axis_size = Int(floor(max(180, min((fig_w - 520) / 2, 0.52 * usable_h - 72))))
+bottom_axis_size = Int(floor(max(150, min((fig_w - 520) / 3, 0.48 * usable_h - 72))))
+tick_vals = [0, π / 2, π, 3π / 2, 2π]
+
+fig = Figure(size=(fig_w, fig_h))
+top_grid = fig[1, 1] = GridLayout(; halign=:center, valign=:center)
+bottom_grid = fig[2, 1] = GridLayout(; halign=:center, valign=:center)
+colgap!(top_grid, 0)
+colgap!(bottom_grid, 0)
+rowgap!(fig.layout, 8)
 
 # (1,1) Composite RGB image — color = velocity direction
-ax_rgb = Axis(fig[1, 1],
+ax_rgb = Axis(top_grid[1, 1],
     xlabel=L"x", ylabel=L"y",
     title=L"\text{RGB composite: } (R,G,B) = (u,v,w)",
+    xticks=tick_vals, yticks=tick_vals,
     xticksmirrored=true, yticksmirrored=true,
     xtickformat=latex_fmt, ytickformat=latex_fmt,
+    width=top_axis_size, height=top_axis_size,
+    titlesize=15,
     aspect=DataAspect())
-image!(ax_rgb, xs, ys, permutedims(img_rgb))   # CairoMakie expects (x, y)
+image!(ax_rgb, (first(xs), last(xs)), (first(ys), last(ys)), permutedims(img_rgb))
 
 # (1,2) Speed magnitude |v|
-ax_s = Axis(fig[1, 2],
+speed_grid = top_grid[1, 3] = GridLayout()
+colgap!(speed_grid, -8)
+ax_s = Axis(speed_grid[1, 1],
     xlabel=L"x", ylabel=L"y",
-    title=L"\|\mathbf{v}\| = \sqrt{u^2+v^2+w^2}",
+    title=L"\text{speed } |v| = \sqrt{u^2+v^2+w^2}",
+    xticks=tick_vals, yticks=tick_vals,
     xticksmirrored=true, yticksmirrored=true,
     xtickformat=latex_fmt, ytickformat=latex_fmt,
+    width=top_axis_size, height=top_axis_size,
+    titlesize=15,
     aspect=DataAspect())
 hm = heatmap!(ax_s, xs, ys, permutedims(speed), colormap=:magma)
-Colorbar(fig[1, 3], hm, label=L"\|\mathbf{v}\|")
+Colorbar(speed_grid[1, 2], hm,
+    label=L"\text{speed } |v|",
+    width=18,
+    height=axis_render_height(ax_s),
+    tellheight=false,
+    valign=:center)
 
 # (2,1..3) Three individual channels — R=u, G=v, B=w
 chan_titles = (L"u(x,y,z_0) \; [R]", L"v(x,y,z_0) \; [G]", L"w(x,y,z_0) \; [B]")
@@ -95,19 +131,29 @@ chan_data   = (U, V, W)
 chan_cmaps  = (:Reds, :Greens, :Blues)
 
 for (k, (data, ttl, cmap)) in enumerate(zip(chan_data, chan_titles, chan_cmaps))
-    ax = Axis(fig[2, k],
+    col = 2k - 1
+    ax = Axis(bottom_grid[1, col],
         xlabel=L"x", ylabel=L"y", title=ttl,
+        xticks=tick_vals, yticks=tick_vals,
         xticksmirrored=true, yticksmirrored=true,
         xtickformat=latex_fmt, ytickformat=latex_fmt,
+        width=bottom_axis_size, height=bottom_axis_size,
+        titlesize=15,
         aspect=DataAspect())
     M = maximum(abs, data)
     heatmap!(ax, xs, ys, permutedims(data),
              colormap=cmap, colorrange=(-M, M))
 end
 
+colsize!(top_grid, 2, Fixed(96))
+colsize!(bottom_grid, 2, Fixed(86))
+colsize!(bottom_grid, 4, Fixed(86))
+rowsize!(fig.layout, 1, Relative(0.52))
+rowsize!(fig.layout, 2, Relative(0.48))
+
 Label(fig[0, :],
     L"\text{ABC flow — RGB slicing of the velocity field at } z_0=\pi/4",
     fontsize=18)
 
 display(fig)
-save("/sessions/dazzling-awesome-hypatia/mnt/MANTA.jl/rgb_velocity_slicing.png", fig; px_per_unit=2)
+save(joinpath(@__DIR__, "rgb_velocity_slicing.png"), fig; px_per_unit=1)

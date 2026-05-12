@@ -529,6 +529,7 @@ function manta_healpix_panels(
     N >= 1 || throw(ArgumentError("Provide at least one HEALPix panel."))
     activate_gl ? GLMakie.activate!() : CairoMakie.activate!()
     fig = Figure(size = _pick_fig_size(figsize))
+    rowgap!(fig.layout, -8)
     title_at(i) = titles === nothing ? "panel $(i)" : String(titles[i])
     cmap_at(i) = cmaps === nothing ? :inferno : cmaps[i]
     clim_at(i, vals) = clims === nothing ? clamped_extrema(vals) : clims[i]
@@ -561,7 +562,16 @@ function manta_healpix_panels(
                 colorrange=clim_at(i, vals),
                 nan_color=:white,
             )
-            Colorbar(fig[1, N + i], hm; width=16)
+            Colorbar(
+                fig[2, i],
+                hm;
+                vertical=false,
+                height=16,
+                tellwidth=false,
+                halign=:center,
+            )
+            rowsize!(fig.layout, 1, Relative(1))
+            rowsize!(fig.layout, 2, Fixed(44))
         end
         set_mollweide_view!(ax, -2.0, 2.0, -1.0, 1.0)
         graticule = draw_mollweide_graticule!(ax)
@@ -813,6 +823,8 @@ function manta_healpix(
     fig = Figure(size = _pick_fig_size(figsize))
 
     main_grid = fig[1, 1] = GridLayout()
+    colgap!(main_grid, -8)
+    rowgap!(main_grid, -8)
 
     ax_img = Axis(
         main_grid[1, 1];
@@ -864,17 +876,26 @@ function manta_healpix(
     end
     lines!(ax_img, region_segments; color=(RGBf(1.0, 0.70, 0.12), 0.98), linewidth=2.3)
 
-    Colorbar(main_grid[1, 2], hm;
-             label = unit_label_tex,
-             width = 18)
+    Colorbar(
+        main_grid[2, 1],
+        hm;
+        label = unit_label_tex,
+        vertical = false,
+        height = 18,
+        tellwidth = false,
+        halign = :center,
+    )
+    rowsize!(main_grid, 1, Relative(1))
+    rowsize!(main_grid, 2, Fixed(52))
 
     # Bandeau info
     info_obs = Observable(latexstring("\\text{move cursor over the map}"))
-    Label(main_grid[2, 1:2], info_obs; halign=:left, fontsize=15)
+    Label(main_grid[3, 1], info_obs; halign=:left, fontsize=15)
+    rowsize!(main_grid, 3, Fixed(30))
 
     # Contrôles
     ax_hist = Axis(
-        main_grid[3, 1:2];
+        main_grid[4, 1];
         title = L"\text{Visible map histogram}",
         xlabel = unit_label_tex,
         ylabel = L"\text{count}",
@@ -885,8 +906,10 @@ function manta_healpix(
     lines!(ax_hist, hist_x_obs, hist_y_obs; color=ui_accent, linewidth=1.5)
     vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe);
             color=(:black, 0.45), linewidth=1.0, linestyle=:dash)
+    rowsize!(main_grid, 4, Fixed(105))
 
-    ctrl = main_grid[4, 1:2] = GridLayout(; alignmode=Outside())
+    ctrl = main_grid[5, 1] = GridLayout(; alignmode=Outside())
+    rowsize!(main_grid, 5, Fixed(190))
     Label(ctrl[1,1], text=L"\text{Scale}", halign=:left, tellwidth=false, fontsize=15)
     scale_menu = Menu(ctrl[1,2]; options=["lin","log10","ln"],
                      prompt = String(scale), width=92)
@@ -894,33 +917,34 @@ function manta_healpix(
     Label(ctrl[1,4], text="Invert colormap", halign=:left, tellwidth=false, fontsize=15)
     invert_chk.checked[] = invert_cmap[]
 
-    Label(ctrl[1,5], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
-    clim_min_box = Textbox(ctrl[1,6]; placeholder="min", width=110, height=30)
-    clim_max_box = Textbox(ctrl[1,7]; placeholder="max", width=110, height=30)
-    apply_btn    = Button(ctrl[1,8]; label="Apply", width=80, height=30)
-    auto_btn     = Button(ctrl[1,9]; label="Auto", width=76, height=30)
-    p1_btn       = Button(ctrl[1,10]; label="p1-p99", width=88, height=30)
-    p5_btn       = Button(ctrl[1,11]; label="p5-p95", width=88, height=30)
-    graticule_chk = Checkbox(ctrl[1,12])
-    Label(ctrl[1,13], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[2,1], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
+    clim_min_box = Textbox(ctrl[2,2]; placeholder="min", width=110, height=30)
+    clim_max_box = Textbox(ctrl[2,3]; placeholder="max", width=110, height=30)
+    apply_btn    = Button(ctrl[2,4]; label="Apply", width=80, height=30)
+    auto_btn     = Button(ctrl[2,5]; label="Auto", width=76, height=30)
+    p1_btn       = Button(ctrl[2,6]; label="p1-p99", width=88, height=30)
+    p5_btn       = Button(ctrl[2,7]; label="p5-p95", width=88, height=30)
+
+    graticule_chk = Checkbox(ctrl[3,1])
+    Label(ctrl[3,2], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
     graticule_chk.checked[] = show_graticule[]
-    reset_zoom_btn = Button(ctrl[1,14]; label="Reset zoom", width=120, height=30)
-    save_btn       = Button(ctrl[1,15]; label="Save PNG", width=120, height=30)
+    reset_zoom_btn = Button(ctrl[3,3]; label="Reset zoom", width=120, height=30)
+    save_btn       = Button(ctrl[3,4]; label="Save PNG", width=120, height=30)
 
-    gauss_chk = Checkbox(ctrl[2,10])
-    Label(ctrl[2,11], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
-    sigma_label = Label(ctrl[2,12], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
-    sigma_slider = Slider(ctrl[2,13:15]; range=LinRange(0, 10, 101), startvalue=1.5, width=210, height=14)
+    gauss_chk = Checkbox(ctrl[3,5])
+    Label(ctrl[3,6], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
+    sigma_label = Label(ctrl[3,7], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
+    sigma_slider = Slider(ctrl[3,8:10]; range=LinRange(0, 10, 101), startvalue=1.5, width=210, height=14)
 
-    Label(ctrl[2,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
-    region_mode_menu = Menu(ctrl[2,2]; options=["point", "box", "circle"], prompt="point", width=108)
-    region_clear_btn = Button(ctrl[2,3]; label="Clear region", width=126, height=30)
-    region_count_label = Label(ctrl[2,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
-    Label(ctrl[2,5], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
-    contour_chk = Checkbox(ctrl[2,6])
-    Label(ctrl[2,7], text="Show", halign=:left, tellwidth=false, fontsize=15)
-    contour_levels_box = Textbox(ctrl[2,8]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
-    contour_apply_btn = Button(ctrl[2,9]; label="Apply", width=80, height=30)
+    Label(ctrl[4,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
+    region_mode_menu = Menu(ctrl[4,2]; options=["point", "box", "circle"], prompt="point", width=108)
+    region_clear_btn = Button(ctrl[4,3]; label="Clear region", width=126, height=30)
+    region_count_label = Label(ctrl[4,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[5,1], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
+    contour_chk = Checkbox(ctrl[5,2])
+    Label(ctrl[5,3], text="Show", halign=:left, tellwidth=false, fontsize=15)
+    contour_levels_box = Textbox(ctrl[5,4:6]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
+    contour_apply_btn = Button(ctrl[5,7]; label="Apply", width=80, height=30)
     contour_chk.checked[] = show_contours[]
 
     if use_manual[]
@@ -1420,6 +1444,8 @@ function manta_healpix_cube(
 
     # Carte
     map_grid = main_grid[1, 1] = GridLayout()
+    colgap!(map_grid, -8)
+    rowgap!(map_grid, -8)
     is_channel_axis = (vunit_eff == "channel")
     title_obs = lift(chan_idx, show_moment, moment_order) do j, show_mom, ord
         if show_mom
@@ -1482,7 +1508,17 @@ function manta_healpix_cube(
     map_unit_label = lift(show_moment, moment_order) do show_mom, ord
         show_mom ? latexstring("\\text{", latex_safe(moment_label(ord)), "}") : data_unit_tex
     end
-    Colorbar(map_grid[1, 2], hm; label=map_unit_label, width=18)
+    Colorbar(
+        map_grid[2, 1],
+        hm;
+        label=map_unit_label,
+        vertical=false,
+        height=18,
+        tellwidth=false,
+        halign=:center,
+    )
+    rowsize!(map_grid, 1, Relative(1))
+    rowsize!(map_grid, 2, Fixed(52))
 
     # Spectre
     # Affiché dans le même espace que la carte (lin/log10/ln) → cohérence
@@ -1559,40 +1595,44 @@ function manta_healpix_cube(
     invert_chk = Checkbox(ctrl[1,6]); Label(ctrl[1,7], text="Invert", halign=:left, tellwidth=false, fontsize=15)
     invert_chk.checked[] = invert_cmap[]
 
-    Label(ctrl[1,8], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
-    clim_min_box = Textbox(ctrl[1,9];  placeholder="min", width=100, height=30)
-    clim_max_box = Textbox(ctrl[1,10]; placeholder="max", width=100, height=30)
-    apply_btn    = Button(ctrl[1,11]; label="Apply",      width=80,  height=30)
-    auto_btn     = Button(ctrl[1,12]; label="Auto",       width=76,  height=30)
-    p1_btn       = Button(ctrl[1,13]; label="p1-p99",     width=88,  height=30)
-    p5_btn       = Button(ctrl[1,14]; label="p5-p95",     width=88,  height=30)
-    graticule_chk = Checkbox(ctrl[1,15])
-    Label(ctrl[1,16], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[2,1], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
+    clim_min_box = Textbox(ctrl[2,2];  placeholder="min", width=100, height=30)
+    clim_max_box = Textbox(ctrl[2,3]; placeholder="max", width=100, height=30)
+    apply_btn    = Button(ctrl[2,4]; label="Apply",      width=80,  height=30)
+    auto_btn     = Button(ctrl[2,5]; label="Auto",       width=76,  height=30)
+    p1_btn       = Button(ctrl[2,6]; label="p1-p99",     width=88,  height=30)
+    p5_btn       = Button(ctrl[2,7]; label="p5-p95",     width=88,  height=30)
+    graticule_chk = Checkbox(ctrl[2,8])
+    Label(ctrl[2,9], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
     graticule_chk.checked[] = show_graticule[]
-    reset_btn    = Button(ctrl[1,17]; label="Reset zoom", width=120, height=30)
-    save_btn     = Button(ctrl[1,18]; label="Save PNG",   width=110, height=30)
+    reset_btn    = Button(ctrl[2,10]; label="Reset zoom", width=120, height=30)
+    save_btn     = Button(ctrl[2,11]; label="Save PNG",   width=110, height=30)
 
-    gauss_chk = Checkbox(ctrl[2,10])
-    Label(ctrl[2,11], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
-    sigma_label = Label(ctrl[2,12], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
-    sigma_slider = Slider(ctrl[2,13:16]; range=LinRange(0, 10, 101), startvalue=1.5, width=220, height=14)
+    gauss_chk = Checkbox(ctrl[3,1])
+    Label(ctrl[3,2], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
+    sigma_label = Label(ctrl[3,3], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
+    sigma_slider = Slider(ctrl[3,4:6]; range=LinRange(0, 10, 101), startvalue=1.5, width=220, height=14)
 
-    Label(ctrl[2,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
-    region_mode_menu = Menu(ctrl[2,2]; options=["point", "box", "circle"], prompt="point", width=108)
-    region_clear_btn = Button(ctrl[2,3]; label="Clear region", width=126, height=30)
-    region_count_label = Label(ctrl[2,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
-    Label(ctrl[2,5], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
-    contour_chk = Checkbox(ctrl[2,6])
-    Label(ctrl[2,7], text="Show", halign=:left, tellwidth=false, fontsize=15)
-    contour_levels_box = Textbox(ctrl[2,8]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
-    contour_apply_btn = Button(ctrl[2,9]; label="Apply", width=80, height=30)
+    Label(ctrl[3,7], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
+    region_mode_menu = Menu(ctrl[3,8]; options=["point", "box", "circle"], prompt="point", width=108)
+    region_clear_btn = Button(ctrl[3,9]; label="Clear region", width=126, height=30)
+    region_count_label = Label(ctrl[3,10]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[4,1], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
+    contour_chk = Checkbox(ctrl[4,2])
+    Label(ctrl[4,3], text="Show", halign=:left, tellwidth=false, fontsize=15)
+    contour_levels_box = Textbox(ctrl[4,4:6]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
+    contour_apply_btn = Button(ctrl[4,7]; label="Apply", width=80, height=30)
     contour_chk.checked[] = show_contours[]
 
-    Label(ctrl[3,1], text=L"\text{Moment}", halign=:left, tellwidth=false, fontsize=15)
-    moment_menu = Menu(ctrl[3,2]; options=["M0 integrated", "M1 mean", "M2 dispersion"], prompt="M0 integrated", width=138)
-    show_moment_btn = Button(ctrl[3,3]; label="Show", width=80, height=30)
-    show_channel_btn = Button(ctrl[3,4]; label="Channel", width=92, height=30)
-    save_moment_fits_btn = Button(ctrl[3,5]; label="Save moment FITS", width=150, height=30)
+    Label(ctrl[5,1], text=L"\text{Moment}", halign=:left, tellwidth=false, fontsize=15)
+    moment_menu = Menu(ctrl[5,2]; options=["M0 integrated", "M1 mean", "M2 dispersion"], prompt="M0 integrated", width=138)
+    show_moment_btn = Button(ctrl[5,3]; label="Show", width=80, height=30)
+    show_channel_btn = Button(ctrl[5,4]; label="Channel", width=92, height=30)
+    save_moment_fits_btn = Button(ctrl[5,5]; label="Save moment FITS", width=150, height=30)
+    rowsize!(main_grid, 1, Relative(1))
+    rowsize!(main_grid, 2, Fixed(165))
+    rowsize!(main_grid, 3, Fixed(100))
+    rowsize!(main_grid, 4, Fixed(205))
 
     if use_manual[]
         a, b = clims_manual[]

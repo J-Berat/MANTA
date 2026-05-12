@@ -9,6 +9,7 @@
 #                   moment_vectors,
 #                   filtered_cube_by_slice,
 #                   make_info_tex, to_cmap, get_box_str, _pick_fig_size,
+#                   _axis_render_height,
 #                   latex_safe, make_main_title, make_slice_title, make_spec_title,
 #                   parse_manual_clims, parse_gif_request,
 #                   SimpleWCSAxis, read_simple_wcs, has_wcs, world_coord,
@@ -23,11 +24,12 @@ export is_rgb_like, as_rgb_image, as_rgb_pixels, rgb_image
 export nan_gaussian_filter
 export automatic_contour_levels, parse_contour_levels
 export parse_contour_specs, format_contour_specs, contour_color_values
-export ijk_to_uv, uv_to_ijk, get_slice
+export ijk_to_uv, uv_to_ijk, get_slice, get_slice_view, get_slice_copy
+export as_float32, parse_path_spec
 export region_uv_indices, mean_region_spectrum
 export dual_view_product, moments, moments_map, moment_map, moment_vectors, filtered_cube_by_slice
 export make_info_tex
-export to_cmap, get_box_str, _pick_fig_size
+export to_cmap, get_box_str, _pick_fig_size, _axis_render_height
 export latex_safe, make_main_title, make_slice_title, make_spec_title
 export parse_manual_clims, parse_gif_request
 export SimpleWCSAxis, read_simple_wcs, has_wcs, world_coord
@@ -555,20 +557,46 @@ Inverse: 2D coords + slice index → 3D voxel.
 end
 
 """
-    get_slice(data::Array{T,3}, axis, idx) -> AbstractMatrix
+    get_slice_view(data::AbstractArray{T,3}, axis, idx) -> SubArray
 
-Returns a 2D slice (view when possible), orientation consistent with `ijk_to_uv`.
+Return a non-allocating 2D view into `data` along `axis` at index `idx`.
+Orientation is consistent with [`ijk_to_uv`](@ref): `axis==1` ⇒ (y,z),
+`axis==2` ⇒ (x,z), `axis==3` ⇒ (x,y).
+
+Mutating the returned view will mutate the underlying cube. Use
+[`get_slice_copy`](@ref) when an independent buffer is required.
 """
-function get_slice(data::AbstractArray{T,3}, axis::Integer, idx::Integer) where {T}
-    @assert 1 ≤ axis ≤ 3 "axis must be 1,2,3"
+function get_slice_view(data::AbstractArray{T,3}, axis::Integer, idx::Integer) where {T}
+    1 <= axis <= 3 || throw(ArgumentError("MANTA: axis must be 1, 2 or 3, got $(axis)"))
+    1 <= idx <= size(data, axis) || throw(BoundsError(data, (axis, idx)))
     if axis == 1
-        @views return copy(data[idx, :, :])  # (y,z)
+        return @view data[idx, :, :]   # (y, z)
     elseif axis == 2
-        @views return copy(data[:, idx, :])  # (x,z)
+        return @view data[:, idx, :]   # (x, z)
     else
-        @views return copy(data[:, :, idx])  # (x,y)
+        return @view data[:, :, idx]   # (x, y)
     end
 end
+
+"""
+    get_slice_copy(data::AbstractArray{T,3}, axis, idx) -> Array
+
+Return a freshly allocated 2D slice. Equivalent to `copy(get_slice_view(...))`.
+Use this when the caller needs to mutate the slice without touching the cube.
+"""
+get_slice_copy(data::AbstractArray, axis::Integer, idx::Integer) =
+    copy(get_slice_view(data, axis, idx))
+
+"""
+    get_slice(data, axis, idx) -> AbstractMatrix
+
+Backwards-compatible slice accessor. Historically copying; kept as a thin
+alias over [`get_slice_copy`](@ref) so existing callers in the cube viewer
+keep their independent buffers. New code should pick `get_slice_view` when
+no mutation is needed.
+"""
+get_slice(data::AbstractArray, axis::Integer, idx::Integer) =
+    get_slice_copy(data, axis, idx)
 
 """
     region_uv_indices(u_max, v_max, x0, y0, x1, y1, shape) -> Vector{Tuple{Int,Int}}
@@ -998,6 +1026,61 @@ make_info_tex(i::Int, j::Int, k::Int, u::Int, v::Int, val::Real) = latexstring(
 )
 
 ############################
+# Type conversion helpers
+############################
+
+"""
+    as_float32(x) -> AbstractArray{Float32}
+
+Return `x` unchanged if it is already a dense `Array{Float32}`, otherwise
+allocate a fresh `Float32` copy. Centralizes the "make-it-display-ready"
+conversion used by loaders and the cube viewer so that we avoid a redundant
+allocation every time the data already has the right type.
+"""
+@inline as_float32(x::Array{Float32}) = x
+@inline as_float32(x::AbstractArray) = eltype(x) === Float32 ? Array{Float32}(x) : Float32.(x)
+
+############################
+# Path spec parsing
+############################
+
+"""
+    parse_path_spec(s) -> (kind, path[, address])
+
+Inspect a path-like string and dispatch to the appropriate loader family:
+
+- `"file.fits"`, `"file.fit"`, `"file.fits.gz"` → `(:fits, path)`
+- `"file.h5"`, `"file.hdf5"`, `"file.he5"`     → `(:hdf5, path, "/")`
+- `"file.h5:/group/dataset"`                    → `(:hdf5, "file.h5", "/group/dataset")`
+- otherwise                                     → `(:unknown, path)`
+
+The HDF5 `path:address` form splits on the LAST `:` only when the prefix has
+an HDF5 extension and the suffix begins with `/`. This rejects Windows drive
+letters (`C:/path/file.h5`) and plain FITS paths.
+"""
+function parse_path_spec(s::AbstractString)
+    str = String(s)
+    # Try HDF5 group-address form first.
+    idx = findlast(==(':'), str)
+    if idx !== nothing
+        prefix = str[1:idx-1]
+        suffix = str[idx+1:end]
+        if !isempty(suffix) && startswith(suffix, "/") &&
+           lowercase(splitext(prefix)[2]) ∈ (".h5", ".hdf5", ".he5")
+            return (:hdf5, String(prefix), String(suffix))
+        end
+    end
+    lower = lowercase(str)
+    if endswith(lower, ".fits") || endswith(lower, ".fit") || endswith(lower, ".fits.gz")
+        return (:fits, str)
+    elseif endswith(lower, ".h5") || endswith(lower, ".hdf5") || endswith(lower, ".he5")
+        return (:hdf5, str, "/")
+    else
+        return (:unknown, str)
+    end
+end
+
+############################
 # IO / UI helpers
 ############################
 
@@ -1042,6 +1125,16 @@ Use an explicit size when provided; otherwise, return a fallback `(1800, 1000)`.
 """
 @inline function _pick_fig_size(sizeopt)
     sizeopt !== nothing ? (Int(sizeopt[1]), Int(sizeopt[2])) : (1800, 1000)
+end
+
+"""
+    _axis_render_height(axis)
+
+Return an observable height matching the axis' rendered data viewport.
+Useful for keeping adjacent colorbars the same height as `DataAspect()` images.
+"""
+_axis_render_height(axis) = lift(axis.scene.viewport) do rect
+    max(1, rect.widths[2])
 end
 
 ############################

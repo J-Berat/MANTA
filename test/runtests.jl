@@ -569,3 +569,173 @@ end
         @test isapprox(s3, -2.0; atol = 1e-9)
     end
 end
+
+# ----------------------------------------------------------------------------
+# Refactor regression tests (Phase 1)
+# ----------------------------------------------------------------------------
+
+@testset "helpers: as_float32 and get_slice variants" begin
+    # No-op on already-Float32 dense arrays.
+    A32 = rand(Float32, 4, 5)
+    @test MANTA.as_float32(A32) === A32
+
+    # Conversion path is allocated, but only when needed.
+    A64 = rand(Float64, 4, 5)
+    A32_from_64 = MANTA.as_float32(A64)
+    @test eltype(A32_from_64) === Float32
+    @test size(A32_from_64) == size(A64)
+
+    # get_slice_view returns a view; get_slice_copy returns an independent
+    # buffer.
+    cube = reshape(collect(Float32, 1:24), 2, 3, 4)
+    sv1 = MANTA.get_slice_view(cube, 1, 1)
+    sv2 = MANTA.get_slice_view(cube, 2, 1)
+    sv3 = MANTA.get_slice_view(cube, 3, 1)
+    @test size(sv1) == (3, 4)
+    @test size(sv2) == (2, 4)
+    @test size(sv3) == (2, 3)
+    @test sv1 isa SubArray
+    @test sv2 isa SubArray
+    @test sv3 isa SubArray
+
+    sc1 = MANTA.get_slice_copy(cube, 1, 1)
+    @test sc1 == sv1
+    sc1[1, 1] = -99f0
+    @test cube[1, 1, 1] != -99f0   # the cube was not mutated by editing the copy.
+
+    @test_throws ArgumentError MANTA.get_slice_view(cube, 4, 1)
+    @test_throws BoundsError MANTA.get_slice_view(cube, 1, 99)
+end
+
+@testset "helpers: parse_path_spec" begin
+    @test first(MANTA.parse_path_spec("foo.fits")) === :fits
+    @test first(MANTA.parse_path_spec("foo.fit")) === :fits
+    @test first(MANTA.parse_path_spec("foo.FITS.GZ")) === :fits
+    @test first(MANTA.parse_path_spec("foo.h5")) === :hdf5
+    @test first(MANTA.parse_path_spec("foo.hdf5")) === :hdf5
+
+    # path:address syntax
+    kind, p, addr = MANTA.parse_path_spec("file.h5:/group/ds")
+    @test kind === :hdf5
+    @test p == "file.h5"
+    @test addr == "/group/ds"
+
+    # Windows-drive letter is NOT treated as an HDF5 spec.
+    @test first(MANTA.parse_path_spec("C:/data/foo.fits")) === :fits
+
+    # Unknown extension.
+    @test first(MANTA.parse_path_spec("notes.txt")) === :unknown
+end
+
+@testset "datasets: load_dataset (in-memory)" begin
+    # 2D array → ImageDataset
+    img32 = rand(Float32, 10, 20)
+    ds_img = MANTA.load_dataset(img32)
+    @test ds_img isa MANTA.ImageDataset
+    @test eltype(ds_img.data) === Float32
+    @test size(ds_img.data) == (10, 20)
+
+    # 3D array → CubeDataset
+    cube32 = rand(Float32, 10, 20, 30)
+    ds_cube = MANTA.load_dataset(cube32)
+    @test ds_cube isa MANTA.CubeDataset
+    @test eltype(ds_cube.data) === Float32
+
+    # Float64 input is preserved by the type alias rule of in-memory loader
+    # (no implicit Float32 cast in this path — display-time conversion is the
+    # viewer's responsibility via `as_float32`).
+    cube64 = rand(Float64, 4, 5, 6)
+    ds_cube64 = MANTA.load_dataset(cube64)
+    @test ds_cube64 isa MANTA.CubeDataset
+    @test eltype(ds_cube64.data) === Float64
+
+    # NamedTuple → MultiChannelDataset
+    Q = rand(Float32, 8, 8, 5)
+    U = rand(Float32, 8, 8, 5)
+    ds_mc = MANTA.load_dataset((Q = Q, U = U))
+    @test ds_mc isa MANTA.MultiChannelDataset
+    @test haskey(ds_mc.channels, :Q)
+    @test haskey(ds_mc.channels, :U)
+    @test ds_mc.kind === :cube
+
+    # Idempotence: load_dataset(ds) === ds
+    @test MANTA.load_dataset(ds_img) === ds_img
+
+    # stable_source_id is deterministic per (typeof, size)
+    sid1 = MANTA.stable_source_id(rand(Float32, 4, 5))
+    sid2 = MANTA.stable_source_id(rand(Float32, 4, 5))
+    @test sid1 == sid2
+    @test sid1 != MANTA.stable_source_id(rand(Float32, 4, 6))
+
+    # source_id override
+    ds_named = MANTA.load_dataset(rand(Float32, 3, 3); source_id = "my_custom_id")
+    @test ds_named.source_id == "my_custom_id"
+
+    # Unsupported ndims → ArgumentError with a clear message.
+    @test_throws ArgumentError MANTA.load_dataset(rand(Float32, 2, 2, 2, 2))
+end
+
+@testset "datasets: load_dataset (paths)" begin
+    @test_throws ArgumentError MANTA.load_dataset("does_not_exist.fits")
+    @test_throws ArgumentError MANTA.load_dataset("does_not_exist.h5")
+    @test_throws ArgumentError MANTA.load_dataset("unrecognised.txt")
+end
+
+@testset "abstract type rename" begin
+    # AbstractMANTADataset is the new name; the carta alias must still resolve
+    # to the same type to avoid breaking external code.
+    @test MANTA.AbstractCartaDataset === MANTA.AbstractMANTADataset
+    @test MANTA.ImageDataset <: MANTA.AbstractMANTADataset
+    @test MANTA.CubeDataset <: MANTA.AbstractMANTADataset
+    @test MANTA.HealpixMapDataset <: MANTA.AbstractMANTADataset
+    @test MANTA.HealpixCubeDataset <: MANTA.AbstractMANTADataset
+    @test MANTA.MultiChannelDataset <: MANTA.AbstractMANTADataset
+end
+
+@testset "dispatch: manta on datasets" begin
+    # Cube dispatch (in-memory). The full interactive viewer now runs even
+    # without a backing FITS file. Headless flags keep it CI-safe: no GL
+    # context, no window display, just figure construction + return.
+    cube_ds = MANTA.load_dataset(rand(Float32, 6, 6, 4))
+    @test cube_ds isa MANTA.CubeDataset
+    fig_cube = MANTA.manta(cube_ds; activate_gl = false, display_fig = false)
+    @test fig_cube isa Makie.Figure
+
+    # Same outcome via the user-facing 3D-array entry point — routes through
+    # load_dataset → CubeDataset → _view_cube.
+    fig_arr = MANTA.manta(rand(Float32, 6, 6, 4);
+                          activate_gl = false, display_fig = false)
+    @test fig_arr isa Makie.Figure
+
+    # `view_cube` is the exported alias for `_view_cube` and accepts the same
+    # CubeDataset directly.
+    fig_vc = MANTA.view_cube(cube_ds; activate_gl = false, display_fig = false)
+    @test fig_vc isa Makie.Figure
+    @test MANTA.view_cube === MANTA._view_cube
+
+    # VectorDataset is still explicitly unsupported.
+    vds = MANTA.load_dataset(rand(Float32, 16))
+    @test vds isa MANTA.VectorDataset
+    @test_throws ErrorException MANTA.manta(vds; activate_gl = false, display_fig = false)
+end
+
+@testset "view_cube: respects dataset fields" begin
+    # Build a CubeDataset with explicit unit_label/source_id and confirm
+    # the viewer constructs a figure that uses them (we can't easily probe
+    # the labels post-construction, but the call should succeed and return
+    # a Makie.Figure).
+    data = rand(Float32, 5, 4, 3)
+    ds = MANTA.CubeDataset(data;
+        axis_labels = ["RA", "Dec", "v"],
+        unit_label  = "Jy/beam",
+        source_id   = "synthetic_cube",
+    )
+    fig = MANTA.view_cube(ds; activate_gl = false, display_fig = false)
+    @test fig isa Makie.Figure
+
+    # Float64 input gets coerced to Float32 by `as_float32`, without a crash.
+    ds64 = MANTA.CubeDataset(rand(Float64, 4, 4, 3))
+    fig64 = MANTA.view_cube(ds64; activate_gl = false, display_fig = false)
+    @test fig64 isa Makie.Figure
+end
+

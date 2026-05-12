@@ -37,8 +37,13 @@ function _view_healpix_map(
     end
 
     scale_mode = Observable(scale)
-    img_disp = lift(scale_mode) do m_
-        out = apply_scale(img_raw, m_)
+    gauss_on = Observable(false)
+    sigma = Observable(1.5f0)
+    img_proc = lift(gauss_on, sigma) do on, σ
+        on ? nan_gaussian_filter(img_raw, σ) : img_raw
+    end
+    img_disp = lift(img_proc, scale_mode) do im, m_
+        out = apply_scale(im, m_)
         # protect: NaN/Inf already turned to NaN by apply_scale in log modes
         out2 = similar(out, Float32)
         @inbounds for k in eachindex(out)
@@ -111,6 +116,8 @@ function _view_healpix_map(
     fig = Figure(size = _pick_fig_size(figsize))
 
     main_grid = fig[1, 1] = GridLayout()
+    colgap!(main_grid, -8)
+    rowgap!(main_grid, -8)
 
     ax_img = Axis(
         main_grid[1, 1];
@@ -162,17 +169,26 @@ function _view_healpix_map(
     end
     lines!(ax_img, region_segments; color=(RGBf(1.0, 0.70, 0.12), 0.98), linewidth=2.3)
 
-    Colorbar(main_grid[1, 2], hm;
-             label = unit_label_tex,
-             width = 18)
+    Colorbar(
+        main_grid[2, 1],
+        hm;
+        label = unit_label_tex,
+        vertical = false,
+        height = 18,
+        tellwidth = false,
+        halign = :center,
+    )
+    rowsize!(main_grid, 1, Relative(1))
+    rowsize!(main_grid, 2, Fixed(52))
 
     # Bandeau info
     info_obs = Observable(latexstring("\\text{move cursor over the map}"))
-    Label(main_grid[2, 1:2], info_obs; halign=:left, fontsize=15)
+    Label(main_grid[3, 1], info_obs; halign=:left, fontsize=15)
+    rowsize!(main_grid, 3, Fixed(30))
 
     # Contrôles
     ax_hist = Axis(
-        main_grid[3, 1:2];
+        main_grid[4, 1];
         title = L"\text{Visible map histogram}",
         xlabel = unit_label_tex,
         ylabel = L"\text{count}",
@@ -183,8 +199,10 @@ function _view_healpix_map(
     lines!(ax_hist, hist_x_obs, hist_y_obs; color=ui_accent, linewidth=1.5)
     vlines!(ax_hist, lift(lim -> [first(lim), last(lim)], clims_safe);
             color=(:black, 0.45), linewidth=1.0, linestyle=:dash)
+    rowsize!(main_grid, 4, Fixed(105))
 
-    ctrl = main_grid[4, 1:2] = GridLayout(; alignmode=Outside())
+    ctrl = main_grid[5, 1] = GridLayout(; alignmode=Outside())
+    rowsize!(main_grid, 5, Fixed(190))
     Label(ctrl[1,1], text=L"\text{Scale}", halign=:left, tellwidth=false, fontsize=15)
     scale_menu = Menu(ctrl[1,2]; options=["lin","log10","ln"],
                      prompt = String(scale), width=92)
@@ -192,28 +210,34 @@ function _view_healpix_map(
     Label(ctrl[1,4], text="Invert colormap", halign=:left, tellwidth=false, fontsize=15)
     invert_chk.checked[] = invert_cmap[]
 
-    Label(ctrl[1,5], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
-    clim_min_box = Textbox(ctrl[1,6]; placeholder="min", width=110, height=30)
-    clim_max_box = Textbox(ctrl[1,7]; placeholder="max", width=110, height=30)
-    apply_btn    = Button(ctrl[1,8]; label="Apply", width=80, height=30)
-    auto_btn     = Button(ctrl[1,9]; label="Auto", width=76, height=30)
-    p1_btn       = Button(ctrl[1,10]; label="p1-p99", width=88, height=30)
-    p5_btn       = Button(ctrl[1,11]; label="p5-p95", width=88, height=30)
-    graticule_chk = Checkbox(ctrl[1,12])
-    Label(ctrl[1,13], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
-    graticule_chk.checked[] = show_graticule[]
-    reset_zoom_btn = Button(ctrl[1,14]; label="Reset zoom", width=120, height=30)
-    save_btn       = Button(ctrl[1,15]; label="Save PNG", width=120, height=30)
+    Label(ctrl[2,1], text=L"\text{Colorbar}", halign=:left, tellwidth=false, fontsize=15)
+    clim_min_box = Textbox(ctrl[2,2]; placeholder="min", width=110, height=30)
+    clim_max_box = Textbox(ctrl[2,3]; placeholder="max", width=110, height=30)
+    apply_btn    = Button(ctrl[2,4]; label="Apply", width=80, height=30)
+    auto_btn     = Button(ctrl[2,5]; label="Auto", width=76, height=30)
+    p1_btn       = Button(ctrl[2,6]; label="p1-p99", width=88, height=30)
+    p5_btn       = Button(ctrl[2,7]; label="p5-p95", width=88, height=30)
 
-    Label(ctrl[2,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
-    region_mode_menu = Menu(ctrl[2,2]; options=["point", "box", "circle"], prompt="point", width=108)
-    region_clear_btn = Button(ctrl[2,3]; label="Clear region", width=126, height=30)
-    region_count_label = Label(ctrl[2,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
-    Label(ctrl[2,5], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
-    contour_chk = Checkbox(ctrl[2,6])
-    Label(ctrl[2,7], text="Show", halign=:left, tellwidth=false, fontsize=15)
-    contour_levels_box = Textbox(ctrl[2,8]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
-    contour_apply_btn = Button(ctrl[2,9]; label="Apply", width=80, height=30)
+    graticule_chk = Checkbox(ctrl[3,1])
+    Label(ctrl[3,2], text="Graticule", halign=:left, tellwidth=false, fontsize=15)
+    graticule_chk.checked[] = show_graticule[]
+    reset_zoom_btn = Button(ctrl[3,3]; label="Reset zoom", width=120, height=30)
+    save_btn       = Button(ctrl[3,4]; label="Save PNG", width=120, height=30)
+
+    gauss_chk = Checkbox(ctrl[3,5])
+    Label(ctrl[3,6], text="Gaussian", halign=:left, tellwidth=false, fontsize=15)
+    sigma_label = Label(ctrl[3,7], text=latexstring("\\sigma = 1.5\\,\\text{px}"), fontsize=15, halign=:left, tellwidth=false)
+    sigma_slider = Slider(ctrl[3,8:10]; range=LinRange(0, 10, 101), startvalue=1.5, width=210, height=14)
+
+    Label(ctrl[4,1], text=L"\text{Region}", halign=:left, tellwidth=false, fontsize=15)
+    region_mode_menu = Menu(ctrl[4,2]; options=["point", "box", "circle"], prompt="point", width=108)
+    region_clear_btn = Button(ctrl[4,3]; label="Clear region", width=126, height=30)
+    region_count_label = Label(ctrl[4,4]; text="0 pix", halign=:left, tellwidth=false, fontsize=15)
+    Label(ctrl[5,1], text=L"\text{Contours}", halign=:left, tellwidth=false, fontsize=15)
+    contour_chk = Checkbox(ctrl[5,2])
+    Label(ctrl[5,3], text="Show", halign=:left, tellwidth=false, fontsize=15)
+    contour_levels_box = Textbox(ctrl[5,4:6]; placeholder="auto or 1:red, 2:#00ffaa", width=250, height=30)
+    contour_apply_btn = Button(ctrl[5,7]; label="Apply", width=80, height=30)
     contour_chk.checked[] = show_contours[]
 
     if use_manual[]
@@ -266,6 +290,13 @@ function _view_healpix_map(
         scale_mode[] = Symbol(sel)
     end
     on(invert_chk.checked) do v; invert_cmap[] = v; end
+    on(gauss_chk.checked) do v
+        gauss_on[] = v
+    end
+    on(sigma_slider.value) do v
+        sigma[] = Float32(v)
+        sigma_label.text[] = latexstring("\\sigma = $(round(v; digits=2))\\,\\text{px}")
+    end
     on(graticule_chk.checked) do v
         show_graticule[] = v
         set_graticule_visible!(graticule, v)
@@ -322,7 +353,7 @@ function _view_healpix_map(
         contour_chk.checked[] = true
     end
 
-    # zoom right-drag, identique à `carta`
+    # zoom right-drag, identique à `manta`
     on(events(ax_img).mousebutton) do ev
         if ev.button == Mouse.right && ev.action == Mouse.press
             p = mouseposition(ax_img); any(isnan, p) && return
