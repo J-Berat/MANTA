@@ -80,31 +80,37 @@ end
 function _load_image_fits(filepath::AbstractString, raw, header)
     data = as_float32(raw)
     wcs = header === nothing ? SimpleWCSAxis[] : read_simple_wcs(header, 2)
+    wcs_xform = header === nothing ? nothing : read_wcs_transform(header, 2)
     unit_label = data_unit_label(header; fallback = "value")
     fname = String(replace(basename(filepath), r"\.fits(\.gz)?$" => ""))
+    meta = Dict{Symbol,Any}(:fits_header => header,
+                            :fits_path => abspath(String(filepath)))
+    wcs_xform === nothing || (meta[:wcs_transform] = wcs_xform)
     return ImageDataset(data;
         axis_labels = ["axis1", "axis2"],
         wcs = wcs,
         unit_label = unit_label,
         source_id = fname,
-        metadata = Dict{Symbol,Any}(:fits_header => header,
-                                    :fits_path => abspath(String(filepath))),
+        metadata = meta,
     )
 end
 
 function _load_cube_fits(filepath::AbstractString, raw, header)
     data = as_float32(raw)
     wcs = header === nothing ? SimpleWCSAxis[] : read_simple_wcs(header, 3)
+    wcs_xform = header === nothing ? nothing : read_wcs_transform(header, 3)
     unit_label = data_unit_label(header; fallback = "value")
     fname_full = basename(filepath)
     fname = String(replace(fname_full, r"\.fits(\.gz)?$" => ""))
+    meta = Dict{Symbol,Any}(:fits_header => header,
+                            :fits_path => abspath(String(filepath)))
+    wcs_xform === nothing || (meta[:wcs_transform] = wcs_xform)
     return CubeDataset(data;
         axis_labels = ["axis1", "axis2", "axis3"],
         wcs = wcs,
         unit_label = unit_label,
         source_id = fname,
-        metadata = Dict{Symbol,Any}(:fits_header => header,
-                                    :fits_path => abspath(String(filepath))),
+        metadata = meta,
     )
 end
 

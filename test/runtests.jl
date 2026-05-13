@@ -116,8 +116,33 @@ end
 end
 
 @testset "helpers: products" begin
-    @test MANTA.moments(Float32[-1, 0, 2, 3]; x = Float32[10, 20, 30, 40]) == (5.0, 36.0, sqrt(24.0))
+    # M0 is now a true integral: Σ y_i Δx_i. For x = [10, 20, 30, 40] the
+    # auto-inferred channel width is 10, so the +y entries (2, 3) contribute
+    # 2·10 + 3·10 = 50 (in [y · x-units]). M1/M2 are weighted averages so
+    # the Δx factor cancels out — they are unchanged vs. the legacy sum form.
+    @test MANTA.moments(Float32[-1, 0, 2, 3]; x = Float32[10, 20, 30, 40]) == (50.0, 36.0, sqrt(24.0))
+    # Explicit scalar dx = 1 reproduces the legacy "sum" semantics.
+    @test MANTA.moments(Float32[-1, 0, 2, 3]; x = Float32[10, 20, 30, 40], dx = 1.0) ==
+          (5.0, 36.0, sqrt(24.0))
     @test all(isnan, MANTA.moments(Float32[-1, 0]; x = Float32[1, 2]))
+
+    # Explicit (nsigma, sigma) overrides the MAD estimate: thr = 2·1 = 2.
+    # Only y_i > 2 survive → 3 + 4 = 7 (Δx = 1).
+    let y = Float32[1, 2, 3, 4], x = Float32[1, 2, 3, 4]
+        m0_clip, _, _ = MANTA.moments(y; x = x, nsigma = 2.0, sigma = 1.0, dx = 1.0)
+        @test m0_clip == 7.0
+    end
+
+    # Robust σ estimator: MAD-based, with the 1.4826 Gaussian factor.
+    # For y = [-3, -1, 0, 1, 3]: median = 0, MAD = 1, σ ≈ 1.4826.
+    @test isapprox(MANTA._robust_sigma(Float64[-3, -1, 0, 1, 3]), 1.4826; atol = 1e-6)
+    @test isnan(MANTA._robust_sigma(Float64[]))
+
+    # Explicit channel window restricts the integration support.
+    let y = Float32[10, 10, 10, 10], x = Float32[1, 2, 3, 4]
+        m0_win, _, _ = MANTA.moments(y; x = x, channels = 2:3, dx = 1.0)
+        @test m0_win == 20.0    # 10 + 10
+    end
 
     a = Float32[2 4; 6 8]
     b = Float32[1 2; 0 4]
@@ -137,11 +162,15 @@ end
     m0 = MANTA.moment_map(cube, 3, 0; coords = Float32[10, 20, 30])
     m1 = MANTA.moment_map(cube, 3, 1; coords = Float32[10, 20, 30])
     M0, M1, M2 = MANTA.moments_map(cube, Float32[10, 20, 30])
-    @test all(==(6f0), m0)
+    # coords have Δv = 10 → M0 is multiplied by Δv vs the legacy sum form.
+    @test all(==(60f0), m0)
     @test M0 == m0
     @test M1 == m1
     @test all(isfinite, M2)
     @test all(isapprox.(m1, Ref(Float32((10 + 40 + 90) / 6)); atol = 1f-5))
+    # Δv = 1 reproduces legacy sums.
+    m0_legacy = MANTA.moment_map(cube, 3, 0; coords = Float32[10, 20, 30], dx = 1.0)
+    @test all(==(6f0), m0_legacy)
     mv0, mv1, mv2 = MANTA.moment_vectors(Float32[0 2 3; -1 0 4], Float32[1, 2, 3])
     @test mv0 == Float32[5, 4]
     @test isfinite(mv1[1]) && isfinite(mv2[1])
@@ -386,6 +415,117 @@ end
     @test MANTA.data_unit_label(Dict{String,Any}("BUNIT" => "K")) == "K"
     @test MANTA.data_unit_label(Dict{String,Any}("BUNIT" => "   ")) == "value"
     @test MANTA.data_unit_label(nothing) == "value"
+
+    # New: CTYPE classification (base / projection / kind / spectral_quantity).
+    @test wcs[1].ctype_base == "RA"
+    @test wcs[1].projection == "TAN"
+    @test wcs[1].kind === :ra
+    @test wcs[2].kind === :dec
+    @test wcs[2].projection == "TAN"
+    @test wcs[1].spectral_quantity === :other
+end
+
+@testset "helpers: wcs transform" begin
+    # 2D sky header with CD matrix (rotated frame) + TAN projection.
+    hdr_cd = Dict{String,Any}(
+        "CTYPE1" => "RA---TAN", "CUNIT1" => "deg",
+        "CRVAL1" => 10.0, "CRPIX1" => 2.0, "CDELT1" => -0.01,
+        "CTYPE2" => "DEC--TAN", "CUNIT2" => "deg",
+        "CRVAL2" => 20.0, "CRPIX2" => 2.0, "CDELT2" => 0.01,
+        # 90° rotation embedded in CD:
+        "CD1_1" => 0.0,   "CD1_2" => -0.01,
+        "CD2_1" => 0.01,  "CD2_2" => 0.0,
+    )
+    wt = MANTA.read_wcs_transform(hdr_cd, 2)
+    @test wt isa MANTA.WCSTransform
+    @test length(wt) == 2
+    @test wt.cd !== nothing
+    @test !wt.has_pc
+    @test MANTA.sky_dims(wt) == (1, 2)
+    @test MANTA.spectral_dim(wt) == 0
+    # WCSTransform must be index/iterate compatible with a plain WCS vector.
+    @test wt[1].kind === :ra
+    @test eachindex(wt) == 1:2
+
+    # pixel_scale on a longitude axis applies cos(lat). For CRVAL2 = 20°,
+    # cos(20°) ≈ 0.9397.
+    sky_scale_ra = MANTA.pixel_scale(wt, 1)
+    @test isapprox(sky_scale_ra, 0.01 * cosd(20.0); rtol = 1e-9)
+    # The latitude axis is untouched.
+    @test isapprox(MANTA.pixel_scale(wt, 2), 0.01; rtol = 1e-9)
+
+    # sky_world_coords at CRPIX returns CRVAL exactly (TAN).
+    coords0 = MANTA.sky_world_coords(wt, 2.0, 2.0)
+    @test coords0 !== nothing
+    @test isapprox(coords0[1], 10.0; atol = 1e-9)
+    @test isapprox(coords0[2], 20.0; atol = 1e-9)
+
+    # PC-only header → reconstructs CD from PC × CDELT.
+    hdr_pc = Dict{String,Any}(
+        "CTYPE1" => "RA---SIN", "CUNIT1" => "deg",
+        "CRVAL1" => 0.0, "CRPIX1" => 1.0, "CDELT1" => -0.1,
+        "CTYPE2" => "DEC--SIN", "CUNIT2" => "deg",
+        "CRVAL2" => 0.0, "CRPIX2" => 1.0, "CDELT2" => 0.1,
+        "PC1_1" => 1.0, "PC2_2" => 1.0,
+    )
+    wt_pc = MANTA.read_wcs_transform(hdr_pc, 2)
+    @test wt_pc.has_pc
+    @test wt_pc.cd !== nothing
+    @test isapprox(wt_pc.cd[1, 1], -0.1; atol = 1e-12)
+    @test wt_pc[1].projection == "SIN"
+    @test wt_pc[1].kind === :ra
+    # SIN: at the pole pixel, returns origin.
+    sc = MANTA.sky_world_coords(wt_pc, 1.0, 1.0)
+    @test sc !== nothing
+    @test isapprox(sc[1], 0.0; atol = 1e-9)
+    @test isapprox(sc[2], 0.0; atol = 1e-9)
+
+    # Pure-linear (no CD, no PC) still produces a transform with cd === nothing.
+    hdr_lin = Dict{String,Any}(
+        "CTYPE1" => "RA---TAN", "CUNIT1" => "deg",
+        "CRVAL1" => 0.0, "CRPIX1" => 1.0, "CDELT1" => 0.5,
+        "CTYPE2" => "DEC--TAN", "CUNIT2" => "deg",
+        "CRVAL2" => 0.0, "CRPIX2" => 1.0, "CDELT2" => 0.5,
+    )
+    wt_lin = MANTA.read_wcs_transform(hdr_lin, 2)
+    @test wt_lin.cd === nothing
+    @test !wt_lin.has_pc
+    @test isapprox(MANTA.pixel_scale(wt_lin, 1), 0.5; rtol = 1e-9)   # cos(0) = 1
+
+    # CAR projection short-circuits to (lon0 + xi, lat0 + eta).
+    hdr_car = Dict{String,Any}(
+        "CTYPE1" => "GLON-CAR", "CUNIT1" => "deg",
+        "CRVAL1" => 30.0, "CRPIX1" => 1.0, "CDELT1" => 1.0,
+        "CTYPE2" => "GLAT-CAR", "CUNIT2" => "deg",
+        "CRVAL2" => 0.0,  "CRPIX2" => 1.0, "CDELT2" => 1.0,
+    )
+    wt_car = MANTA.read_wcs_transform(hdr_car, 2)
+    @test wt_car[1].kind === :glon
+    @test wt_car[2].kind === :glat
+    car = MANTA.sky_world_coords(wt_car, 3.0, 2.0)
+    @test car !== nothing
+    @test isapprox(car[1], 30.0 + 2.0; atol = 1e-9)
+    @test isapprox(car[2], 0.0 + 1.0; atol = 1e-9)
+
+    # Spectral classification: VRAD / FREQ / WAVE → :spectral with the right
+    # quantity. wcs_axis_label and spectral_quantity_word reflect the kind.
+    hdr_spec = Dict{String,Any}(
+        "CTYPE3" => "FREQ", "CUNIT3" => "Hz",
+        "CRVAL3" => 1.0e11, "CRPIX3" => 1.0, "CDELT3" => 1.0e6,
+    )
+    wt_spec = MANTA.read_wcs_transform(hdr_spec, 3)
+    @test MANTA.spectral_dim(wt_spec) == 3
+    @test MANTA.spectral_quantity(wt_spec, 3) === :frequency
+    @test MANTA.spectral_quantity_word(:frequency) == "frequency"
+    @test MANTA.spectral_quantity_word(:velocity) == "velocity"
+    @test MANTA.spectral_quantity_word(:wavelength) == "wavelength"
+    @test MANTA.spectral_quantity_word(:other) == "value"
+    @test occursin("frequency", lowercase(String(MANTA.wcs_axis_label(wt_spec, 3))))
+
+    # VRAD and WAVE classification.
+    @test MANTA.SimpleWCSAxis("VRAD",   "m/s", 0, 1, 1, true).spectral_quantity === :velocity
+    @test MANTA.SimpleWCSAxis("WAVE",   "m",   0, 1, 1, true).spectral_quantity === :wavelength
+    @test MANTA.SimpleWCSAxis("STOKES", "",    0, 1, 1, true).kind === :stokes
 end
 
 @testset "helpers: settings io" begin
@@ -838,4 +978,121 @@ end
     ds64 = MANTA.CubeDataset(rand(Float64, 4, 4, 3))
     fig64 = MANTA.view_cube(ds64; activate_gl = false, display_fig = false)
     @test fig64 isa Makie.Figure
+end
+
+@testset "helpers: FITS export headers" begin
+    # Build a reference cube header with two sky axes and a spectral axis.
+    src_keys = String[
+        "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3",
+        "CTYPE1", "CRPIX1", "CRVAL1", "CDELT1", "CUNIT1",
+        "CTYPE2", "CRPIX2", "CRVAL2", "CDELT2", "CUNIT2",
+        "CTYPE3", "CRPIX3", "CRVAL3", "CDELT3", "CUNIT3",
+        "BUNIT", "OBJECT", "TELESCOP", "SPECSYS", "RESTFRQ",
+        "PC1_2", "PC2_1", "PV2_1",
+        "HISTORY",
+    ]
+    src_vals = Any[
+        -32, 3, 8, 6, 4,
+        "RA---TAN", 4.5, 150.0, -0.01, "deg",
+        "DEC--TAN", 3.5,  10.0,  0.01, "deg",
+        "VRAD",    1.0,   2.0e5, 1.0e3, "m/s",
+        "K", "Source X", "ALMA", "LSRK", 1.0e11,
+        0.0, 0.0, 0.1,
+        nothing,
+    ]
+    src_comms = String[
+        "", "", "", "", "",
+        "axis1", "", "", "", "",
+        "axis2", "", "", "", "",
+        "axis3", "", "", "", "",
+        "data unit", "", "", "", "",
+        "", "", "",
+        "original cube",
+    ]
+    src_hdr = FITSIO.FITSHeader(src_keys, src_vals, src_comms)
+
+    # --- slice header: drop axis 3, keep BUNIT/OBJECT, add HISTORY ---
+    sh = MANTA.fits_header_for_slice(src_hdr, 3, 12; source_id = "cube_x")
+    @test sh isa FITSIO.FITSHeader
+    @test haskey(sh, "CTYPE1") && haskey(sh, "CTYPE2")
+    @test !haskey(sh, "CTYPE3")
+    @test sh["CTYPE1"] == "RA---TAN"
+    @test sh["CTYPE2"] == "DEC--TAN"
+    @test sh["BUNIT"] == "K"
+    @test sh["OBJECT"] == "Source X"
+    # HISTORY is stored as comment text; check at least one MANTA history line.
+    history_idx = findall(==("HISTORY"), sh.keys)
+    @test !isempty(history_idx)
+    @test any(occursin("MANTA slice axis=3 index=12 source=cube_x", sh.comments[i])
+              for i in history_idx)
+
+    # --- slice header: dropping axis 1 should renumber axis 2 -> 1 and 3 -> 2
+    sh1 = MANTA.fits_header_for_slice(src_hdr, 1, 4)
+    @test sh1["CTYPE1"] == "DEC--TAN"
+    @test sh1["CTYPE2"] == "VRAD"
+    @test sh1["CUNIT2"] == "m/s"
+
+    # --- moment header: order 0 keeps BUNIT, order 1/2 use CUNIT_axis ---
+    m0 = MANTA.fits_header_for_moment(src_hdr, 3, 0)
+    @test m0["BUNIT"] == "K"
+    m1 = MANTA.fits_header_for_moment(src_hdr, 3, 1)
+    @test m1["BUNIT"] == "m/s"
+    m2 = MANTA.fits_header_for_moment(src_hdr, 3, 2)
+    @test m2["BUNIT"] == "m/s"
+    # COMMENT card explaining BUNIT must be present.
+    @test any(==("COMMENT"), m1.keys)
+
+    # Missing CUNIT path produces "?" placeholder (Composer + commentaire).
+    src_keys2 = copy(src_keys)
+    src_vals2 = copy(src_vals)
+    src_comms2 = copy(src_comms)
+    # Wipe CUNIT3.
+    cu_idx = findfirst(==("CUNIT3"), src_keys2)
+    @assert cu_idx !== nothing
+    deleteat!(src_keys2, cu_idx)
+    deleteat!(src_vals2, cu_idx)
+    deleteat!(src_comms2, cu_idx)
+    src_hdr_nocunit = FITSIO.FITSHeader(src_keys2, src_vals2, src_comms2)
+    m1_q = MANTA.fits_header_for_moment(src_hdr_nocunit, 3, 1)
+    @test m1_q["BUNIT"] == "?"
+
+    # --- region spectrum: only axis 3 WCS survives, renumbered to axis 1 ---
+    rs = MANTA.fits_header_for_region_spectrum(src_hdr, 3, 42)
+    @test rs["CTYPE1"] == "VRAD"
+    @test rs["CUNIT1"] == "m/s"
+    @test rs["CRVAL1"] ≈ 2.0e5
+    @test !haskey(rs, "CTYPE2")
+    @test !haskey(rs, "CTYPE3")
+    @test rs["SPECSYS"] == "LSRK"
+    @test rs["RESTFRQ"] ≈ 1.0e11
+
+    # --- filtered cube: full WCS kept, MANTA history added ---
+    fc = MANTA.fits_header_for_filtered_cube(src_hdr, 3, 1.5)
+    @test fc["CTYPE3"] == "VRAD"
+    @test fc["BUNIT"] == "K"
+    @test any(occursin("MANTA filtered axis=3 sigma=1.5", fc.comments[i])
+              for i in findall(==("HISTORY"), fc.keys))
+
+    # --- nothing input passes through ---
+    @test MANTA.fits_header_for_slice(nothing, 3, 1) === nothing
+    @test MANTA.fits_header_for_moment(nothing, 3, 0) === nothing
+    @test MANTA.fits_header_for_region_spectrum(nothing, 3, 1) === nothing
+    @test MANTA.fits_header_for_filtered_cube(nothing, 3, 1.0) === nothing
+
+    # --- end-to-end: write a real FITS file and read the header back ---
+    mktempdir() do dir
+        out = joinpath(dir, "slice.fits")
+        FITSIO.FITS(out, "w") do f
+            FITSIO.write(f, rand(Float32, 8, 6); header = sh)
+        end
+        FITSIO.FITS(out, "r") do f
+            rh = FITSIO.read_header(f[1])
+            # FITSIO may pad string values with trailing spaces.
+            @test strip(String(rh["CTYPE1"])) == "RA---TAN"
+            @test strip(String(rh["CTYPE2"])) == "DEC--TAN"
+            @test strip(String(rh["BUNIT"])) == "K"
+            @test strip(String(rh["OBJECT"])) == "Source X"
+            @test !haskey(rh, "CTYPE3")
+        end
+    end
 end

@@ -42,6 +42,9 @@ function _view_cube(
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    moment_threshold::Real = 0.0,
+    moment_nsigma::Union{Nothing,Real} = nothing,
+    moment_channels::Union{Nothing,AbstractVector{<:Integer}} = nothing,
 )
     data = as_float32(ds.data)
     siz  = size(data)
@@ -193,8 +196,17 @@ function _view_cube(
         end
     end
 
+    # Δx along the slicing axis comes from the WCS step when available; for
+    # a pure-channel axis this falls back to dx=1 so M0 stays numerically
+    # in "K·channel" rather than silently relying on the old summation.
+    moment_dx_for(a::Integer) = has_wcs(wcs, a) ? abs(Float64(wcs[a].cdelt)) : 1.0
+
     moment_raw = lift(axis, moment_order) do a, ord
-        moment_map(data, a, ord; coords = spectral_coords(a))
+        moment_map(data, a, ord; coords = spectral_coords(a),
+                   threshold = moment_threshold,
+                   nsigma = moment_nsigma,
+                   channels = moment_channels === nothing ? (1:siz[a]) : moment_channels,
+                   dx = moment_dx_for(a))
     end
 
     view_raw = lift(slice_raw, moment_raw, view_product) do s, m, product
@@ -380,10 +392,31 @@ function _view_cube(
             latexstring("\\text{", latex_safe(fname), " ", latex_safe(order == 0 ? "moment 0" : order == 1 ? "moment 1" : "moment 2"), "}") :
             make_main_title(fname)
     end
-    display_unit_label = lift(view_product, moment_order) do product, order
-        product === :moment ?
-            latexstring("\\text{", latex_safe(order == 0 ? "integrated intensity" : order == 1 ? "mean velocity" : "dispersion"), "}") :
-            unit_label_tex
+    # Moment captions follow the spectral quantity along the integrated axis:
+    # FREQ → "mean frequency / frequency dispersion", WAVE → "wavelength",
+    # VRAD/VOPT → "velocity". Falls back to "value" when no WCS classifies
+    # the axis (channel-only cubes).
+    spectral_word_for(a::Integer) =
+        spectral_quantity_word(spectral_quantity(wcs, a))
+    moment_unit_for(a::Integer) = begin
+        has_wcs(wcs, a) && !isempty(wcs[a].cunit) ? " [" * wcs[a].cunit * "]" : ""
+    end
+    integrated_intensity_label(a::Integer) = begin
+        u_ax = moment_unit_for(a)
+        u = isempty(u_ax) ? unit_label :
+            (unit_label == "value" ? strip(u_ax, [' ', '[', ']']) :
+             unit_label * "·" * strip(u_ax, [' ', '[', ']']))
+        "integrated intensity [" * String(u) * "]"
+    end
+    display_unit_label = lift(view_product, moment_order, axis) do product, order, a
+        if product !== :moment
+            return unit_label_tex
+        end
+        word = spectral_word_for(a)
+        text = order == 0 ? integrated_intensity_label(a) :
+               order == 1 ? "mean " * word * moment_unit_for(a) :
+                            word * " dispersion" * moment_unit_for(a)
+        latexstring("\\text{", latex_safe(text), "}")
     end
     ax_img = Axis(
         img_grid[1, 1];
@@ -1948,14 +1981,19 @@ function _view_cube(
             pmax = isempty(prof) ? 1.0f0 : maximum(prof)
             floor_val = Float32(max(eps(Float32), pmax * 1f-12))
             p_floored = max.(prof, floor_val)
+            # log–log : on retire le DC (k = 0) et tout k ≤ 0 (cf. convention :log10).
+            pos_mask = k .> 0
+            k_pos = k[pos_mask]
+            p_pos = p_floored[pos_mask]
 
             ax = Axis(
                 ps_plot_grid[1, 1];
-                title = latexstring("\\text{1D radial power spectrum — ", latex_safe(src_label), "}"),
+                title = latexstring("\\text{1D radial power spectrum (log–log) — ", latex_safe(src_label), "}"),
                 xlabel = use_phys ?
                     latexstring("k\\;(", latex_safe(k_unit_lbl), ")") :
                     L"k\;\text{(cycles/pixel)}",
                 ylabel = L"\langle|F|^2\rangle",
+                xscale = log10,
                 yscale = log10,
                 width = ps_axis_size,
                 height = ps_axis_size,
@@ -1963,7 +2001,7 @@ function _view_cube(
                 valign = :top,
                 xtickformat = latex_tick_formatter,
             )
-            isempty(k) || lines!(ax, k, p_floored; color = ui_accent, linewidth = 1.8)
+            isempty(k_pos) || lines!(ax, k_pos, p_pos; color = ui_accent, linewidth = 1.8)
             push!(ps_layout_blocks, ax)
 
             if ps_layout_fit[] && length(k) >= 3
@@ -2103,9 +2141,15 @@ function _view_cube(
 
     moment_label() = moment_order[] == 0 ? "moment0" : moment_order[] == 1 ? "moment1" : "moment2"
 
-    function write_fits_array(path::AbstractString, arr)
+    # Write a Float32 array to a FITS primary HDU, optionally preserving the
+    # cube's original header (WCS / BUNIT / provenance) via FITSIO.
+    function write_fits_array(path::AbstractString, arr; header = nothing)
         FITS(String(path), "w") do f
-            write(f, Float32.(arr))
+            if header === nothing
+                write(f, Float32.(arr))
+            else
+                write(f, Float32.(arr); header = header)
+            end
         end
         nothing
     end
@@ -2140,17 +2184,24 @@ function _view_cube(
     end
 
     function export_fits_product!(product::AbstractString, out::AbstractString)
+        src_id = String(ds.source_id)
         if product == "slice"
-            write_fits_array(out, get_slice(data, axis[], idx[]))
+            hdr = fits_header_for_slice(header, axis[], idx[]; source_id = src_id)
+            write_fits_array(out, get_slice(data, axis[], idx[]); header = hdr)
         elseif product == "region"
             if isempty(region_uvs[])
                 throw(ArgumentError("select a box or circle region before exporting the averaged region FITS"))
             end
-            write_fits_array(out, mean_region_spectrum(data, axis[], region_uvs[]))
+            spec = mean_region_spectrum(data, axis[], region_uvs[])
+            hdr = fits_header_for_region_spectrum(header, axis[], length(region_uvs[]);
+                                                  source_id = src_id)
+            write_fits_array(out, spec; header = hdr)
         elseif product == "moment"
-            write_fits_array(out, moment_raw[])
+            hdr = fits_header_for_moment(header, axis[], moment_order[]; source_id = src_id)
+            write_fits_array(out, moment_raw[]; header = hdr)
         elseif product == "filtered cube"
-            write_fits_array(out, filtered_cube_by_slice(data, axis[], sigma[]))
+            hdr = fits_header_for_filtered_cube(header, axis[], sigma[]; source_id = src_id)
+            write_fits_array(out, filtered_cube_by_slice(data, axis[], sigma[]); header = hdr)
         else
             throw(ArgumentError("unknown FITS product: $(product)"))
         end
@@ -2179,7 +2230,9 @@ function _view_cube(
             base = isempty(base) ? "$(fname)_$(moment_label())" : base
             out = joinpath(save_root, make_name(base, "fits"))
             try
-                write_fits_array(out, moment_raw[])
+                hdr = fits_header_for_moment(header, axis[], moment_order[];
+                                             source_id = String(ds.source_id))
+                write_fits_array(out, moment_raw[]; header = hdr)
                 set_status!("Saved moment FITS to $(out).")
             catch e
                 msg = "Failed to save moment FITS $(out): $(sprint(showerror, e))"

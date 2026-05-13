@@ -368,6 +368,9 @@ function manta_healpix_cube(
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    moment_threshold::Real = 0.0,
+    moment_nsigma::Union{Nothing,Real} = nothing,
+    moment_channels::Union{Nothing,AbstractVector{<:Integer}} = nothing,
 )
     ds = load_dataset(filepath; v0 = v0, dv = dv, vunit = vunit)
     ds isa HealpixCubeDataset || throw(ArgumentError(
@@ -379,7 +382,31 @@ function manta_healpix_cube(
         display_fig = display_fig,
         hist_mode = hist_mode, hist_bins = hist_bins,
         hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
-        spec_ylimits = spec_ylimits)
+        spec_ylimits = spec_ylimits,
+        moment_threshold = moment_threshold,
+        moment_nsigma = moment_nsigma,
+        moment_channels = moment_channels)
+end
+
+"""
+    _vunit_quantity_word(vunit) -> String
+
+Classify a spectral CUNIT-style string into the matching quantity word
+("velocity", "frequency", "wavelength"). HEALPix-PPV datasets don't carry
+a CTYPE through the viewer pipeline, so we infer from the unit instead.
+Defaults to "velocity" because the historical default was km/s.
+"""
+function _vunit_quantity_word(vunit::AbstractString)
+    u = lowercase(strip(String(vunit)))
+    if u in ("hz", "khz", "mhz", "ghz", "thz")
+        return "frequency"
+    elseif u in ("m", "nm", "um", "µm", "mm", "cm", "angstrom", "å", "a")
+        return "wavelength"
+    elseif u == "channel"
+        return "value"
+    else
+        return "velocity"  # km/s, m/s and bare blank fall here
+    end
 end
 
 function _view_healpix_cube(
@@ -400,6 +427,9 @@ function _view_healpix_cube(
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    moment_threshold::Real = 0.0,
+    moment_nsigma::Union{Nothing,Real} = nothing,
+    moment_channels::Union{Nothing,AbstractVector{<:Integer}} = nothing,
 )
     cube = as_float32(ds.data)
     nside = ds.nside
@@ -411,7 +441,23 @@ function _view_healpix_cube(
     data_unit_tex = latexstring("\\text{", latex_safe(data_unit), "}")
     fname = ds.source_id
     spec_x = Float32.(v0_eff .+ (0:nv-1) .* dv_eff)
-    moment_vecs = moment_vectors(cube, spec_x; threshold = 0.0)
+    # Pass the actual Δx through so M0 is "K·(spectral unit)" (e.g. K·km/s,
+    # K·Hz) rather than the historical "K·channel" summation. Threshold and
+    # channel window are forwarded from the public viewer kwargs so noisy or
+    # continuum-subtracted cubes can be cleaned up without a code edit.
+    moment_dx_unit = vunit_eff == "channel" ? 1.0 : abs(Float64(dv_eff))
+    moment_vecs = moment_vectors(cube, spec_x;
+                                 threshold = moment_threshold,
+                                 nsigma = moment_nsigma,
+                                 channels = moment_channels === nothing ? (1:nv) : moment_channels,
+                                 dx = moment_dx_unit)
+    # Choose a label that follows the spectral axis: velocity / frequency /
+    # wavelength (heuristic on `vunit`, since HealpixCubeDataset only stores
+    # the unit string, not a CTYPE).
+    spec_word = _vunit_quantity_word(vunit_eff)
+    moment_caption(order::Integer) = order == 0 ? "moment 0 [$(data_unit) " * vunit_eff * "]" :
+                                     order == 1 ? "mean " * spec_word * " [" * vunit_eff * "]" :
+                                                  spec_word * " dispersion [" * vunit_eff * "]"
 
     # ---------- Précalcul de l'index Mollweide (une fois) ----------
     res = Healpix.Resolution(nside)
@@ -431,6 +477,8 @@ function _view_healpix_cube(
     frame_image(j::Int) = projected_vector_image(@view(cube[:, j]))
     moment_vector(order::Integer) = order == 0 ? moment_vecs[1] : order == 1 ? moment_vecs[2] : moment_vecs[3]
     moment_label(order::Integer) = order == 0 ? "moment 0" : order == 1 ? "moment 1" : "moment 2"
+    # Public caption shown in titles: encodes the spectral quantity and unit.
+    moment_long_label(order::Integer) = moment_caption(order)
 
     # ---------- État ----------
     cmap_name   = Observable(cmap)
@@ -624,7 +672,7 @@ function _view_healpix_cube(
     is_channel_axis = (vunit_eff == "channel")
     title_obs = lift(chan_idx, show_moment, moment_order) do j, show_mom, ord
         if show_mom
-            return latexstring("\\text{", latex_safe(fname), "}\\;\\text{", latex_safe(moment_label(ord)), "}")
+            return latexstring("\\text{", latex_safe(fname), "}\\;\\text{", latex_safe(moment_long_label(ord)), "}")
         end
         v = v0_eff + (j-1)*dv_eff
         if is_channel_axis

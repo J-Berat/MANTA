@@ -15,6 +15,9 @@
 #                   parse_manual_clims, parse_gif_request,
 #                   SimpleWCSAxis, read_simple_wcs, has_wcs, world_coord,
 #                   wcs_axis_label, format_world_coord, data_unit_label,
+#                   WCSTransform, read_wcs_transform, pixel_scale,
+#                   sky_world_coords, spectral_quantity, spectral_quantity_word,
+#                   sky_dims, spectral_dim,
 #                   save_viewer_settings, load_viewer_settings
 
 ############################
@@ -38,6 +41,10 @@ export parse_manual_clims, parse_histogram_bins, parse_histogram_xlimits
 export parse_histogram_ylimits, parse_spectrum_ylimits, parse_gif_request
 export SimpleWCSAxis, read_simple_wcs, has_wcs, world_coord
 export wcs_axis_label, format_world_coord, data_unit_label
+export WCSTransform, read_wcs_transform, pixel_scale, sky_world_coords
+export spectral_quantity, spectral_quantity_word, sky_dims, spectral_dim
+export fits_header_for_slice, fits_header_for_moment
+export fits_header_for_region_spectrum, fits_header_for_filtered_cube
 export save_viewer_settings, load_viewer_settings
 export power_spectrum_2d, power_spectrum_1d_radial, fit_loglog_slope
 
@@ -47,7 +54,7 @@ export power_spectrum_2d, power_spectrum_1d_radial, fit_loglog_slope
 using Makie
 using LaTeXStrings
 using TOML
-using Statistics: quantile, mean
+using Statistics: quantile, mean, median
 using ImageFiltering
 using FFTW: fft, fftshift
 import GLFW
@@ -813,23 +820,118 @@ function _channel_value(data, axis::Integer, u::Integer, v::Integer, chan::Integ
 end
 
 """
-    moments(y; x=1:length(y), threshold=0.0) -> (m0, m1, m2)
+    _channel_widths(x, dx) -> Vector{Float64}
 
-Calculate zeroth, first, and second moments using only samples where
-`y > threshold`, matching the project-local `Statistics/Moments.jl` routine.
+Resolve effective channel widths `Δx_i` used for moment integration.
+
+* `dx === nothing`: infer from `x` using centered differences for interior
+  channels and a half-step for the edges (one-sided for the boundary case).
+  Falls back to `ones(length(x))` if `length(x) <= 1`.
+* `dx` is a `Number`: uniform width applied to every channel.
+* `dx` is an iterable: per-channel width vector (must have `length(x)` entries).
 """
-function moments(y; x = 1:length(y), threshold = 0.0)
+function _channel_widths(x, dx)
+    n = length(x)
+    if dx === nothing
+        n == 0 && return Float64[]
+        n == 1 && return Float64[1.0]
+        widths = Vector{Float64}(undef, n)
+        widths[1] = abs(Float64(x[2]) - Float64(x[1]))
+        widths[n] = abs(Float64(x[n]) - Float64(x[n-1]))
+        @inbounds for i in 2:n-1
+            widths[i] = 0.5 * abs(Float64(x[i+1]) - Float64(x[i-1]))
+        end
+        return widths
+    elseif dx isa Number
+        return fill(Float64(dx), n)
+    else
+        v = collect(Float64, dx)
+        length(v) == n || throw(DimensionMismatch("dx length must match x length"))
+        return v
+    end
+end
+
+"""
+    _robust_sigma(y) -> Float64
+
+MAD-based robust standard-deviation estimator. Returns `NaN` if `y` has no
+finite samples. The 1.4826 factor converts the median absolute deviation to
+a Gaussian-equivalent σ.
+"""
+function _robust_sigma(y)
+    finite = Float64[]
+    @inbounds for v in y
+        fv = Float64(v); isfinite(fv) && push!(finite, fv)
+    end
+    isempty(finite) && return NaN
+    med = median(finite)
+    mad = median(abs.(finite .- med))
+    return 1.4826 * mad
+end
+
+"""
+    _resolve_threshold(y, threshold, nsigma, sigma) -> Float64
+
+Combine an absolute floor (`threshold`) with an optional sigma-clipping
+specification. When `nsigma` is given, the effective threshold becomes
+`nsigma * σ` where σ is either the user-supplied `sigma` or a MAD-based
+robust estimate of σ from `y`. If σ cannot be estimated, the absolute
+`threshold` is returned.
+"""
+function _resolve_threshold(y, threshold, nsigma, sigma)
+    if nsigma === nothing
+        return Float64(threshold)
+    end
+    σ = sigma === nothing ? _robust_sigma(y) : Float64(sigma)
+    return isfinite(σ) && σ > 0 ? Float64(nsigma) * σ : Float64(threshold)
+end
+
+"""
+    moments(y; x=1:length(y), threshold=0.0, nsigma=nothing, sigma=nothing,
+            dx=nothing, channels=nothing) -> (m0, m1, m2)
+
+Compute the zeroth, first and second moments of `y(x)` as proper
+integrals along the spectral axis:
+
+```
+M0 = Σ y_i Δx_i                 (e.g. K·km/s when y is K and Δx is km/s)
+M1 = Σ y_i x_i Δx_i / M0
+M2 = sqrt( Σ y_i (x_i - M1)^2 Δx_i / M0 )
+```
+
+Only samples with `y_i > threshold` contribute. Set `nsigma` to clip below
+`nsigma * σ` instead of an absolute value (σ defaults to a MAD-based robust
+estimate of the spectrum, or the user-provided `sigma`). Pass `channels`
+to restrict the sum to a specific spectral window. `dx` overrides the
+auto-detected channel widths (scalar = uniform Δx, vector = per-channel).
+"""
+function moments(y; x = 1:length(y), threshold = 0.0, nsigma = nothing,
+                 sigma = nothing, dx = nothing, channels = nothing)
     length(x) == length(y) || throw(DimensionMismatch("x and y must have the same length"))
+    widths = _channel_widths(x, dx)
+    in_window = if channels === nothing
+        nothing
+    else
+        m = falses(length(y))
+        for c in channels
+            (c isa Integer && 1 <= c <= length(y)) && (m[c] = true)
+        end
+        m
+    end
+    thr = _resolve_threshold(y, threshold, nsigma, sigma)
+
     acc0 = 0.0
     acc1 = 0.0
     any_sample = false
     @inbounds for i in eachindex(y, x)
+        in_window !== nothing && !in_window[i] && continue
         yi = Float64(y[i])
-        if isfinite(yi) && yi > threshold
+        if isfinite(yi) && yi > thr
             any_sample = true
             xi = Float64(x[i])
-            acc0 += yi
-            acc1 += yi * xi
+            w = widths[i]
+            acc0 += yi * w
+            acc1 += yi * xi * w
         end
     end
     (!any_sample || acc0 == 0.0) && return (NaN, NaN, NaN)
@@ -837,10 +939,12 @@ function moments(y; x = 1:length(y), threshold = 0.0)
     m1 = acc1 / m0
     acc2 = 0.0
     @inbounds for i in eachindex(y, x)
+        in_window !== nothing && !in_window[i] && continue
         yi = Float64(y[i])
-        if isfinite(yi) && yi > threshold
+        if isfinite(yi) && yi > thr
             xi = Float64(x[i])
-            acc2 += yi * (xi - m1)^2
+            w = widths[i]
+            acc2 += yi * (xi - m1)^2 * w
         end
     end
     m2_2 = acc2 / m0
@@ -849,18 +953,24 @@ function moments(y; x = 1:length(y), threshold = 0.0)
 end
 
 """
-    moments_map(data, array; threshold=0.0) -> (M0, M1, M2)
+    moments_map(data, array; threshold=0.0, nsigma=nothing, sigma=nothing,
+                dx=nothing, channels=nothing) -> (M0, M1, M2)
 
-Calculate moment maps for a cube whose spectral axis is the third dimension,
-matching `Statistics/Moments.jl`.
+Compute moment 0/1/2 maps along the third dimension of `data`. Forwards all
+threshold / Δx / channel-window controls to [`moments`](@ref).
 """
-function moments_map(data::AbstractArray{T,3}, array; threshold = 0.0) where {T}
+function moments_map(data::AbstractArray{T,3}, array;
+                     threshold = 0.0, nsigma = nothing, sigma = nothing,
+                     dx = nothing, channels = nothing) where {T}
     length(array) == size(data, 3) || throw(DimensionMismatch("array length must match size(data, 3)"))
+    widths = _channel_widths(array, dx)
     M0 = Matrix{Float32}(undef, size(data, 1), size(data, 2))
     M1 = similar(M0)
     M2 = similar(M0)
     @inbounds for i in 1:size(data, 1), j in 1:size(data, 2)
-        m0, m1, m2 = moments(@view(data[i, j, :]); x = array, threshold = threshold)
+        m0, m1, m2 = moments(@view(data[i, j, :]); x = array, threshold = threshold,
+                             nsigma = nsigma, sigma = sigma, dx = widths,
+                             channels = channels)
         M0[i, j] = Float32(m0)
         M1[i, j] = Float32(m1)
         M2[i, j] = Float32(m2)
@@ -869,11 +979,14 @@ function moments_map(data::AbstractArray{T,3}, array; threshold = 0.0) where {T}
 end
 
 """
-    moment_map(data, axis, order; coords=1:size(data, axis), channels=1:size(data, axis), threshold=0.0)
+    moment_map(data, axis, order; coords=1:size(data, axis),
+               channels=1:size(data, axis),
+               threshold=0.0, nsigma=nothing, sigma=nothing, dx=nothing)
 
 Compute moment 0, 1, or 2 along `axis`, returning a 2D map in the same
 orientation as `get_slice`. The moment definition is delegated to
-`moments(y; x=coords, threshold=threshold)`.
+[`moments`](@ref) — see its docstring for the integration convention and
+the threshold / channel-window options.
 """
 function moment_map(
     data::AbstractArray{T,3},
@@ -882,6 +995,9 @@ function moment_map(
     coords = collect(Float32, 1:size(data, axis)),
     channels = 1:size(data, axis),
     threshold = 0.0,
+    nsigma = nothing,
+    sigma = nothing,
+    dx = nothing,
 ) where {T}
     1 <= axis <= 3 || throw(ArgumentError("axis must be 1, 2, or 3"))
     order in (0, 1, 2) || throw(ArgumentError("moment order must be 0, 1, or 2"))
@@ -892,26 +1008,39 @@ function moment_map(
     chan_vec = [c for c in channels if 1 <= c <= size(data, axis)]
     isempty(chan_vec) && return out
 
+    x = Float32[Float32(coords[c]) for c in chan_vec]
+    widths = _channel_widths(x, dx)
     y = Vector{Float32}(undef, length(chan_vec))
-    x = Vector{Float32}(undef, length(chan_vec))
     @inbounds for u in 1:u_max, v in 1:v_max
         for (n, c) in pairs(chan_vec)
             y[n] = Float32(_channel_value(data, axis, u, v, c))
-            x[n] = Float32(coords[c])
         end
-        m0, m1, m2 = moments(y; x = x, threshold = threshold)
+        m0, m1, m2 = moments(y; x = x, threshold = threshold, nsigma = nsigma,
+                             sigma = sigma, dx = widths)
         out[u, v] = order == 0 ? Float32(m0) : order == 1 ? Float32(m1) : Float32(m2)
     end
     return out
 end
 
-function moment_vectors(data::AbstractMatrix, x; threshold = 0.0)
+"""
+    moment_vectors(data, x; threshold=0.0, nsigma=nothing, sigma=nothing,
+                   dx=nothing, channels=nothing) -> (M0, M1, M2)
+
+Per-row moments for a 2D `(npix, nchan)` matrix (typical HEALPix-PPV
+layout). Forwards all options to [`moments`](@ref).
+"""
+function moment_vectors(data::AbstractMatrix, x;
+                        threshold = 0.0, nsigma = nothing, sigma = nothing,
+                        dx = nothing, channels = nothing)
     length(x) == size(data, 2) || throw(DimensionMismatch("x length must match size(data, 2)"))
+    widths = _channel_widths(x, dx)
     M0 = Vector{Float32}(undef, size(data, 1))
     M1 = similar(M0)
     M2 = similar(M0)
     @inbounds for i in 1:size(data, 1)
-        m0, m1, m2 = moments(@view(data[i, :]); x = x, threshold = threshold)
+        m0, m1, m2 = moments(@view(data[i, :]); x = x, threshold = threshold,
+                             nsigma = nsigma, sigma = sigma, dx = widths,
+                             channels = channels)
         M0[i] = Float32(m0)
         M1[i] = Float32(m1)
         M2[i] = Float32(m2)
@@ -947,6 +1076,29 @@ end
 # Simple FITS WCS
 ############################
 
+"""
+    SimpleWCSAxis
+
+Per-axis linear WCS description plus a small classifier derived from
+`CTYPE`. Keeps the historical 6-arg constructor working — additional
+fields (`ctype_base`, `projection`, `kind`, `spectral_quantity`) are
+auto-populated by parsing the raw `CTYPE` string.
+
+Field summary:
+
+| field              | meaning                                                       |
+| ------------------ | ------------------------------------------------------------- |
+| `ctype`            | raw `CTYPEi` string (preserved for FITS round-trip & display) |
+| `cunit`            | raw `CUNITi` string                                           |
+| `crval`            | `CRVALi`                                                      |
+| `crpix`            | `CRPIXi`                                                      |
+| `cdelt`            | `CDELTi` (diagonal fallback when CD/PC is absent)             |
+| `available`        | true if any of CTYPE / CRVAL / CDELT was actually present     |
+| `ctype_base`       | "RA", "DEC", "GLON", "FREQ", … (CTYPE prefix, upper-cased)    |
+| `projection`       | "TAN", "SIN", "CAR", "ARC", "ZEA", … or "" if linear          |
+| `kind`             | `:ra | :dec | :glon | :glat | :elon | :elat | :spectral | :stokes | :unknown` |
+| `spectral_quantity`| `:velocity | :frequency | :wavelength | :other` (for `:spectral` axes) |
+"""
 struct SimpleWCSAxis
     ctype::String
     cunit::String
@@ -954,6 +1106,63 @@ struct SimpleWCSAxis
     crpix::Float64
     cdelt::Float64
     available::Bool
+    ctype_base::String
+    projection::String
+    kind::Symbol
+    spectral_quantity::Symbol
+end
+
+function SimpleWCSAxis(ctype::AbstractString, cunit::AbstractString,
+                       crval::Real, crpix::Real, cdelt::Real, available::Bool)
+    s = String(ctype)
+    base, proj = _split_ctype(s)
+    k, qty = _classify_ctype(base)
+    return SimpleWCSAxis(s, String(cunit), Float64(crval), Float64(crpix),
+                         Float64(cdelt), Bool(available), base, proj, k, qty)
+end
+
+function _split_ctype(s::AbstractString)
+    s = String(s)
+    stripped = strip(s)
+    isempty(stripped) && return ("", "")
+    # FITS sky CTYPE format: "RA---TAN", "GLON-CAR", "DEC--SIN" etc.
+    idx = findfirst(==('-'), s)
+    if idx === nothing
+        return (String(uppercase(stripped)), "")
+    end
+    base = uppercase(strip(s[1:idx-1]))
+    proj_raw = s[idx:end]
+    # collapse the run of '-' separators and pick whatever non-empty token follows
+    proj = uppercase(strip(replace(proj_raw, '-' => "")))
+    return (String(base), String(proj))
+end
+
+function _classify_ctype(base::AbstractString)
+    up = uppercase(strip(String(base)))
+    if up == "RA"
+        return (:ra, :other)
+    elseif up == "DEC"
+        return (:dec, :other)
+    elseif startswith(up, "GLON")
+        return (:glon, :other)
+    elseif startswith(up, "GLAT")
+        return (:glat, :other)
+    elseif startswith(up, "ELON")
+        return (:elon, :other)
+    elseif startswith(up, "ELAT")
+        return (:elat, :other)
+    elseif startswith(up, "VRAD") || startswith(up, "VOPT") ||
+           startswith(up, "VELO") || up == "VELOCITY"
+        return (:spectral, :velocity)
+    elseif startswith(up, "FREQ") || startswith(up, "FELO")
+        return (:spectral, :frequency)
+    elseif startswith(up, "WAVE") || startswith(up, "AWAV")
+        return (:spectral, :wavelength)
+    elseif startswith(up, "STOKES")
+        return (:stokes, :other)
+    else
+        return (:unknown, :other)
+    end
 end
 
 header_has(header, key::AbstractString) = try
@@ -969,7 +1178,9 @@ header_get(header, key::AbstractString, default) = header_has(header, key) ? hea
 
 Read a lightweight linear WCS from FITS header keywords. This intentionally
 handles the common `CTYPE/CRVAL/CRPIX/CDELT/CUNIT` case without requiring a
-full WCS dependency.
+full WCS dependency. CD/PC matrices and projection-aware deprojections are
+exposed via the richer [`WCSTransform`](@ref) returned by
+[`read_wcs_transform`](@ref).
 """
 function read_simple_wcs(header, naxes::Integer)
     axes = SimpleWCSAxis[]
@@ -985,29 +1196,295 @@ function read_simple_wcs(header, naxes::Integer)
     return axes
 end
 
+"""
+    WCSTransform
+
+Aggregates a `Vector{SimpleWCSAxis}` with the optional FITS CD matrix and
+high-level helpers (which axes form the sky pair, which axis is spectral).
+
+`WCSTransform` behaves like `Vector{SimpleWCSAxis}` for indexed lookups
+(`wcs[dim]`, `length`, iteration), so existing call sites that expect that
+shape keep working — see also the compat methods just below the struct.
+The CD matrix is filled either from `CDi_j` headers (preferred) or from
+`PCi_j × CDELTi` when CD is absent.
+"""
+struct WCSTransform
+    axes::Vector{SimpleWCSAxis}
+    cd::Union{Nothing, Matrix{Float64}}
+    has_pc::Bool                       # true if the matrix was reconstructed from PC + CDELT
+    sky_dims::Tuple{Int,Int}            # (lon_dim, lat_dim) or (0, 0)
+    spectral_dim::Int                   # 0 if none
+end
+
+# Compat: `WCSTransform` is interchangeable with `Vector{SimpleWCSAxis}` at
+# index / length / iterate sites used throughout the viewers.
+Base.length(w::WCSTransform) = length(w.axes)
+Base.getindex(w::WCSTransform, i::Integer) = w.axes[i]
+Base.iterate(w::WCSTransform, st::Integer = 1) =
+    st > length(w.axes) ? nothing : (w.axes[st], st + 1)
+Base.eachindex(w::WCSTransform) = eachindex(w.axes)
+Base.firstindex(w::WCSTransform) = 1
+Base.lastindex(w::WCSTransform) = length(w.axes)
+
+"""
+    read_wcs_transform(header, naxes) -> WCSTransform
+
+Read both the per-axis WCS and the optional CD/PC linear transform. CD
+takes precedence; otherwise PC is multiplied by the diagonal CDELT to
+reconstruct an equivalent CD matrix. Falls back gracefully when neither
+matrix is present — the returned transform then carries `cd = nothing`
+and the consumers downgrade to the diagonal CDELT.
+"""
+function read_wcs_transform(header, naxes::Integer)
+    n = Int(naxes)
+    axes_v = read_simple_wcs(header, n)
+    cd = nothing
+    has_cd = false
+    for i in 1:n, j in 1:n
+        if header_has(header, "CD$(i)_$(j)")
+            has_cd = true
+            break
+        end
+    end
+    if has_cd
+        cd = zeros(Float64, n, n)
+        # Seed diagonal with CDELT in case the file only specifies the off-diagonals.
+        for i in 1:n
+            cd[i, i] = axes_v[i].cdelt
+        end
+        for i in 1:n, j in 1:n
+            k = "CD$(i)_$(j)"
+            if header_has(header, k)
+                cd[i, j] = Float64(header_get(header, k, 0.0))
+            end
+        end
+    end
+    has_pc = false
+    if cd === nothing
+        for i in 1:n, j in 1:n
+            if header_has(header, "PC$(i)_$(j)")
+                has_pc = true
+                break
+            end
+        end
+        if has_pc
+            pc = zeros(Float64, n, n)
+            for i in 1:n
+                pc[i, i] = 1.0
+            end
+            for i in 1:n, j in 1:n
+                k = "PC$(i)_$(j)"
+                header_has(header, k) && (pc[i, j] = Float64(header_get(header, k, i == j ? 1.0 : 0.0)))
+            end
+            cd = similar(pc)
+            for i in 1:n, j in 1:n
+                cd[i, j] = pc[i, j] * axes_v[i].cdelt
+            end
+        end
+    end
+    return WCSTransform(axes_v, cd, has_pc, _sky_pair(axes_v), _spectral_dim(axes_v))
+end
+
+function _sky_pair(axes_v)
+    lon = 0
+    lat = 0
+    for (i, ax) in pairs(axes_v)
+        if ax.kind in (:ra, :glon, :elon)
+            lon = i
+        elseif ax.kind in (:dec, :glat, :elat)
+            lat = i
+        end
+    end
+    return (lon, lat)
+end
+
+function _spectral_dim(axes_v)
+    for (i, ax) in pairs(axes_v)
+        ax.kind === :spectral && return i
+    end
+    return 0
+end
+
+"""
+    sky_dims(wcs) -> Tuple{Int,Int}
+
+Return `(lon_dim, lat_dim)` for the celestial pair, or `(0, 0)` if no pair
+is identified. Accepts either a `WCSTransform` or a plain
+`Vector{SimpleWCSAxis}`.
+"""
+sky_dims(wcs::WCSTransform) = wcs.sky_dims
+sky_dims(wcs::AbstractVector{<:SimpleWCSAxis}) = _sky_pair(wcs)
+
+"""
+    spectral_dim(wcs) -> Int
+
+Return the spectral axis index (1-based) or `0` when none is identified.
+"""
+spectral_dim(wcs::WCSTransform) = wcs.spectral_dim
+spectral_dim(wcs::AbstractVector{<:SimpleWCSAxis}) = _spectral_dim(wcs)
+
+"""
+    spectral_quantity(wcs, dim) -> Symbol
+
+Return `:velocity | :frequency | :wavelength | :other`. `has_wcs(wcs, dim)`
+must be true; otherwise returns `:other`.
+"""
+spectral_quantity(wcs, dim::Integer) =
+    has_wcs(wcs, dim) ? wcs[dim].spectral_quantity : :other
+
+"""
+    spectral_quantity_word(qty) -> String
+
+Map a spectral-quantity symbol to a human label suitable for axis titles
+and moment captions: `"velocity"`, `"frequency"`, `"wavelength"`, or the
+generic fallback `"value"`.
+"""
+spectral_quantity_word(qty::Symbol) =
+    qty === :velocity ? "velocity" :
+    qty === :frequency ? "frequency" :
+    qty === :wavelength ? "wavelength" : "value"
+
 has_wcs(wcs, dim::Integer) = 1 <= dim <= length(wcs) && wcs[dim].available
 
 world_coord(wcs, dim::Integer, pix::Real) =
     has_wcs(wcs, dim) ? wcs[dim].crval + (Float64(pix) - wcs[dim].crpix) * wcs[dim].cdelt : Float64(pix)
+
+"""
+    pixel_scale(wcs, dim; ref=nothing) -> Float64
+
+Pixel scale along axis `dim`, in the axis' native unit (e.g. degrees for
+sky axes, Hz for `FREQ`). For longitude axes (`RA`, `GLON`, `ELON`) the
+scale is multiplied by `cos(latitude)`, evaluated at the latitude axis'
+`CRVAL` (or at the pixel value supplied via `ref` if you want the scale
+at a specific latitude). For a `WCSTransform` carrying a CD matrix, the
+column-norm of CD is used so off-diagonal terms (rotated FITS frames) are
+honoured; otherwise the diagonal `CDELT` is the fallback.
+"""
+function pixel_scale(wcs::AbstractVector{<:SimpleWCSAxis}, dim::Integer; ref = nothing)
+    1 <= dim <= length(wcs) || return 1.0
+    return abs(wcs[dim].cdelt) * _cos_lat_factor(wcs, dim, ref)
+end
+
+function pixel_scale(wcs::WCSTransform, dim::Integer; ref = nothing)
+    1 <= dim <= length(wcs.axes) || return 1.0
+    base = if wcs.cd === nothing
+        abs(wcs.axes[dim].cdelt)
+    else
+        s = 0.0
+        @inbounds for i in 1:length(wcs.axes)
+            s += wcs.cd[i, dim]^2
+        end
+        sqrt(s)
+    end
+    return base * _cos_lat_factor(wcs, dim, ref)
+end
+
+function _cos_lat_factor(wcs, dim::Integer, ref)
+    ax = wcs[dim]
+    ax.kind in (:ra, :glon, :elon) || return 1.0
+    lat_ax = nothing
+    lat_idx = 0
+    for (i, a) in pairs(wcs)
+        if a.kind in (:dec, :glat, :elat)
+            lat_ax = a
+            lat_idx = i
+            break
+        end
+    end
+    lat_ax === nothing && return 1.0
+    lat_deg = ref === nothing ? lat_ax.crval : world_coord(wcs, lat_idx, ref)
+    return cosd(Float64(lat_deg))
+end
+
+"""
+    sky_world_coords(wcs::WCSTransform, pix1, pix2) -> (lon_deg, lat_deg) | nothing
+
+Apply the 2-D celestial WCS — CD matrix plus the projection encoded in
+`CTYPE` — to a pair of pixel coordinates and return `(longitude, latitude)`
+in degrees. Returns `nothing` if the transform has no identified sky pair
+or if the deprojection falls outside its valid domain (e.g. ρ > 1 for
+SIN).
+
+Supported projections: `TAN` (gnomonic), `SIN` (orthographic),
+`CAR` (plate carrée), and a linear pass-through for anything else.
+"""
+function sky_world_coords(wcs::WCSTransform, pix1::Real, pix2::Real)
+    lon_d, lat_d = wcs.sky_dims
+    (lon_d == 0 || lat_d == 0) && return nothing
+    lon_ax = wcs.axes[lon_d]
+    lat_ax = wcs.axes[lat_d]
+    n = length(wcs.axes)
+    dpix = zeros(Float64, n)
+    dpix[lon_d] = Float64(pix1) - lon_ax.crpix
+    dpix[lat_d] = Float64(pix2) - lat_ax.crpix
+    if wcs.cd === nothing
+        xi  = dpix[lon_d] * lon_ax.cdelt
+        eta = dpix[lat_d] * lat_ax.cdelt
+    else
+        v = wcs.cd * dpix
+        xi  = v[lon_d]
+        eta = v[lat_d]
+    end
+    return _deproject_sky(uppercase(lon_ax.projection), lon_ax.crval, lat_ax.crval, xi, eta)
+end
+
+function _deproject_sky(proj::AbstractString, lon0_deg::Real, lat0_deg::Real,
+                        xi_deg::Real, eta_deg::Real)
+    if proj == "TAN" || isempty(proj)
+        ξ = deg2rad(xi_deg); η = deg2rad(eta_deg)
+        ρ = sqrt(ξ^2 + η^2)
+        ρ == 0 && return (Float64(lon0_deg), Float64(lat0_deg))
+        c = atan(ρ)
+        lat0 = deg2rad(lat0_deg); lon0 = deg2rad(lon0_deg)
+        sinφ = cos(c) * sin(lat0) + (η * sin(c) * cos(lat0)) / ρ
+        φ = asin(clamp(sinφ, -1.0, 1.0))
+        λ = lon0 + atan(ξ * sin(c), ρ * cos(lat0) * cos(c) - η * sin(lat0) * sin(c))
+        return (rad2deg(λ), rad2deg(φ))
+    elseif proj == "SIN"
+        ξ = deg2rad(xi_deg); η = deg2rad(eta_deg)
+        ρ = sqrt(ξ^2 + η^2)
+        ρ > 1 && return nothing
+        ρ == 0 && return (Float64(lon0_deg), Float64(lat0_deg))
+        c = asin(ρ)
+        lat0 = deg2rad(lat0_deg); lon0 = deg2rad(lon0_deg)
+        sinφ = cos(c) * sin(lat0) + (η * sin(c) * cos(lat0)) / ρ
+        φ = asin(clamp(sinφ, -1.0, 1.0))
+        λ = lon0 + atan(ξ * sin(c), ρ * cos(lat0) * cos(c) - η * sin(lat0) * sin(c))
+        return (rad2deg(λ), rad2deg(φ))
+    elseif proj == "CAR"
+        return (Float64(lon0_deg) + Float64(xi_deg),
+                Float64(lat0_deg) + Float64(eta_deg))
+    else
+        # Unknown projection → linear fall-through; viewers should
+        # treat the result as approximate.
+        return (Float64(lon0_deg) + Float64(xi_deg),
+                Float64(lat0_deg) + Float64(eta_deg))
+    end
+end
 
 function wcs_axis_label(wcs, dim::Integer; fallback::AbstractString = "pixel")
     if !has_wcs(wcs, dim)
         return latexstring("\\text{", latex_safe(fallback), "}")
     end
     ax = wcs[dim]
-    ctype = uppercase(ax.ctype)
-    name = if occursin("RA", ctype)
+    name = if ax.kind === :ra
         "RA"
-    elseif occursin("DEC", ctype)
+    elseif ax.kind === :dec
         "Dec"
-    elseif occursin("GLON", ctype) || occursin("LON", ctype)
-        "longitude"
-    elseif occursin("GLAT", ctype) || occursin("LAT", ctype)
-        "latitude"
-    elseif isempty(ax.ctype)
+    elseif ax.kind === :glon
+        "Galactic longitude"
+    elseif ax.kind === :glat
+        "Galactic latitude"
+    elseif ax.kind === :elon
+        "Ecliptic longitude"
+    elseif ax.kind === :elat
+        "Ecliptic latitude"
+    elseif ax.kind === :spectral
+        spectral_quantity_word(ax.spectral_quantity)
+    elseif isempty(ax.ctype_base)
         "world $(dim)"
     else
-        ax.ctype
+        ax.ctype_base
     end
     unit = isempty(ax.cunit) ? "" : " [$(ax.cunit)]"
     return latexstring("\\text{", latex_safe(name * unit), "}")
@@ -1035,6 +1512,286 @@ function data_unit_label(header; fallback::AbstractString = "value")
     unit = header_get(header, "BUNIT", "")
     s = strip(String(unit))
     return isempty(s) ? String(fallback) : s
+end
+
+############################
+# FITS header export helpers
+############################
+
+# Per-axis WCS keyword prefixes bound to a numeric axis index.
+const _FITS_AXIS_KEY_PREFIXES = ("CTYPE", "CRPIX", "CRVAL", "CDELT", "CUNIT",
+                                 "CROTA", "CNAME", "CRDER", "CSYER", "PS",
+                                 "WCSNAME")
+
+# Keys the FITSIO writer rebuilds itself (`write(::FITS, arr; header=hdr)`
+# refuses these in the user-supplied header). We strip them when copying.
+const _FITS_FORBIDDEN_HEADER_KEYS = (
+    "SIMPLE", "EXTEND", "BITPIX", "NAXIS",
+    "NAXIS1", "NAXIS2", "NAXIS3", "NAXIS4",
+    "XTENSION", "PCOUNT", "GCOUNT", "GROUPS",
+    "TFIELDS", "THEAP", "END",
+)
+
+_is_forbidden_header_key(key::AbstractString) =
+    uppercase(String(key)) in _FITS_FORBIDDEN_HEADER_KEYS
+
+# True when `key` binds a header card to FITS axis number `axis`.
+function _fits_key_binds_axis(key::AbstractString, axis::Integer)
+    s = uppercase(String(key))
+    suffix = string(axis)
+    for prefix in _FITS_AXIS_KEY_PREFIXES
+        s == prefix * suffix && return true
+        prefix == "PS" && startswith(s, "PS" * suffix * "_") && return true
+    end
+    m = match(r"^(PC|CD)(\d+)_(\d+)$", s)
+    if m !== nothing
+        i = parse(Int, m.captures[2])
+        j = parse(Int, m.captures[3])
+        return i == axis || j == axis
+    end
+    m2 = match(r"^PV(\d+)_(\d+)$", s)
+    if m2 !== nothing
+        i = parse(Int, m2.captures[1])
+        return i == axis
+    end
+    return false
+end
+
+# Renumber a WCS key bound to axis `from` to axis `to`. Pass-through otherwise.
+function _fits_key_renumber(key::AbstractString, from::Integer, to::Integer)
+    s = uppercase(String(key))
+    suffix_from = string(from)
+    for prefix in _FITS_AXIS_KEY_PREFIXES
+        s == prefix * suffix_from && return prefix * string(to)
+    end
+    m = match(r"^(PC|CD)(\d+)_(\d+)$", s)
+    if m !== nothing
+        tag = m.captures[1]
+        i = parse(Int, m.captures[2])
+        j = parse(Int, m.captures[3])
+        i == from && (i = to)
+        j == from && (j = to)
+        return string(tag, i, "_", j)
+    end
+    m2 = match(r"^PV(\d+)_(\d+)$", s)
+    if m2 !== nothing
+        i = parse(Int, m2.captures[1])
+        i == from && (i = to)
+        return string("PV", i, "_", m2.captures[2])
+    end
+    return String(key)
+end
+
+_set_history!(ks::Vector{String}, vs::Vector{Any}, cs::Vector{String}, text::AbstractString) = begin
+    push!(ks, "HISTORY")
+    push!(vs, nothing)
+    push!(cs, String(text))
+    return nothing
+end
+
+_set_comment_card!(ks::Vector{String}, vs::Vector{Any}, cs::Vector{String}, text::AbstractString) = begin
+    push!(ks, "COMMENT")
+    push!(vs, nothing)
+    push!(cs, String(text))
+    return nothing
+end
+
+_set_card!(ks::Vector{String}, vs::Vector{Any}, cs::Vector{String},
+           key::AbstractString, value, comment::AbstractString = "") = begin
+    target = uppercase(String(key))
+    idx = findlast(k -> uppercase(k) == target, ks)
+    if idx === nothing
+        push!(ks, String(key))
+        push!(vs, value)
+        push!(cs, String(comment))
+    else
+        vs[idx] = value
+        isempty(comment) || (cs[idx] = String(comment))
+    end
+    return nothing
+end
+
+# Read the (key, value, comment) triplet vectors from a FITSIO.FITSHeader.
+# Falls back to iterating with `keys(hdr)` if the struct fields differ.
+function _fits_header_triplets(src)
+    if hasproperty(src, :keys) && hasproperty(src, :values) && hasproperty(src, :comments)
+        return (collect(String, src.keys),
+                Any[src.values[i] for i in eachindex(src.values)],
+                collect(String, src.comments))
+    end
+    ks = collect(String, keys(src))
+    vs = Any[src[k] for k in ks]
+    cs = String[]
+    for k in ks
+        comment = try
+            FITSIO.get_comment(src, k)
+        catch
+            ""
+        end
+        push!(cs, String(comment))
+    end
+    return (ks, vs, cs)
+end
+
+# Copy the source header into fresh vectors, stripping the keys the FITSIO
+# writer rebuilds (NAXIS, BITPIX, ...). Caller adds axis-specific changes.
+function _copy_passthrough_header(src; drop_axes::Tuple = ())
+    ks, vs, cs = _fits_header_triplets(src)
+    out_k = String[]
+    out_v = Any[]
+    out_c = String[]
+    @inbounds for i in eachindex(ks)
+        k = ks[i]
+        _is_forbidden_header_key(k) && continue
+        skip = false
+        for ax in drop_axes
+            if _fits_key_binds_axis(k, ax)
+                skip = true
+                break
+            end
+        end
+        skip && continue
+        push!(out_k, k)
+        push!(out_v, vs[i])
+        push!(out_c, cs[i])
+    end
+    return out_k, out_v, out_c
+end
+
+function _renumber_axes!(ks::Vector{String}, mapping::AbstractDict)
+    @inbounds for i in eachindex(ks)
+        k = ks[i]
+        for (from, to) in mapping
+            from == to && continue
+            if _fits_key_binds_axis(k, from)
+                ks[i] = _fits_key_renumber(k, from, to)
+                break
+            end
+        end
+    end
+    return nothing
+end
+
+# Spectral CUNIT lookup for moment BUNIT composition.
+function _spectral_cunit(src, axis::Integer)
+    src === nothing && return ""
+    s = strip(String(header_get(src, "CUNIT$(axis)", "")))
+    return String(s)
+end
+
+# Spectral CTYPE lookup, used for HISTORY context only.
+function _spectral_ctype(src, axis::Integer)
+    src === nothing && return ""
+    s = strip(String(header_get(src, "CTYPE$(axis)", "")))
+    return String(s)
+end
+
+"""
+    fits_header_for_slice(src, axis, idx; source_id="") -> Union{Nothing,FITSHeader}
+
+Build a 2D `FITSHeader` from the cube's primary header by dropping the WCS
+keywords of the collapsed `axis` and renumbering the remaining axes so that
+they are contiguous 1..2. Returns `nothing` when `src` is missing. The
+original `BUNIT` and provenance keys (OBJECT/TELESCOP/INSTRUME/...) are
+passed through, and a `HISTORY MANTA slice axis=… index=…` card is appended.
+"""
+function fits_header_for_slice(src, axis::Integer, idx::Integer;
+                               source_id::AbstractString = "")
+    src === nothing && return nothing
+    axis in (1, 2, 3) || throw(ArgumentError("axis must be 1, 2, or 3"))
+    ks, vs, cs = _copy_passthrough_header(src; drop_axes = (axis,))
+    kept = filter(!=(axis), (1, 2, 3))
+    _renumber_axes!(ks, Dict(kept[1] => 1, kept[2] => 2))
+    msg = "MANTA slice axis=$(axis) index=$(idx)"
+    isempty(source_id) || (msg *= " source=$(source_id)")
+    _set_history!(ks, vs, cs, msg)
+    return FITSIO.FITSHeader(ks, vs, cs)
+end
+
+"""
+    fits_header_for_moment(src, axis, order; source_id="") -> Union{Nothing,FITSHeader}
+
+Build a 2D `FITSHeader` for a moment map computed along `axis` (order 0/1/2).
+Drops the collapsed axis WCS, renumbers the survivors and rewrites `BUNIT`
+to reflect the moment definition used by `moments`:
+
+* order 0: `BUNIT` stays equal to the source (`moments` sums samples, no
+  `dv` factor) with a `COMMENT BUNIT` card describing the operation.
+* order 1: `BUNIT` becomes the spectral `CUNIT` (intensity-weighted mean of
+  the spectral coordinate). `?` if `CUNIT` is missing.
+* order 2: same as order 1 (sqrt of intensity-weighted variance).
+
+Always appends `HISTORY MANTA moment order=… axis=…`.
+"""
+function fits_header_for_moment(src, axis::Integer, order::Integer;
+                                source_id::AbstractString = "")
+    src === nothing && return nothing
+    axis in (1, 2, 3) || throw(ArgumentError("axis must be 1, 2, or 3"))
+    order in (0, 1, 2) || throw(ArgumentError("moment order must be 0, 1, or 2"))
+    ks, vs, cs = _copy_passthrough_header(src; drop_axes = (axis,))
+    kept = filter(!=(axis), (1, 2, 3))
+    _renumber_axes!(ks, Dict(kept[1] => 1, kept[2] => 2))
+
+    bunit_src = strip(String(header_get(src, "BUNIT", "")))
+    cunit_ax = _spectral_cunit(src, axis)
+    ctype_ax = _spectral_ctype(src, axis)
+
+    new_bunit, bunit_comment = if order == 0
+        unit = isempty(bunit_src) ? "?" : bunit_src
+        (unit, "sum of samples along axis $(axis); no dv factor")
+    elseif order == 1
+        unit = isempty(cunit_ax) ? "?" : cunit_ax
+        (unit, "intensity-weighted mean of $(isempty(ctype_ax) ? "axis $(axis)" : ctype_ax)")
+    else
+        unit = isempty(cunit_ax) ? "?" : cunit_ax
+        (unit, "sqrt of intensity-weighted variance of $(isempty(ctype_ax) ? "axis $(axis)" : ctype_ax)")
+    end
+
+    _set_card!(ks, vs, cs, "BUNIT", new_bunit, "MANTA moment-$(order) unit")
+    _set_comment_card!(ks, vs, cs, "BUNIT: " * bunit_comment)
+    msg = "MANTA moment order=$(order) axis=$(axis)"
+    isempty(source_id) || (msg *= " source=$(source_id)")
+    _set_history!(ks, vs, cs, msg)
+    return FITSIO.FITSHeader(ks, vs, cs)
+end
+
+"""
+    fits_header_for_region_spectrum(src, axis, npix; source_id="") -> Union{Nothing,FITSHeader}
+
+Build a 1D `FITSHeader` for a region-averaged spectrum. Keeps only the WCS of
+the spectral `axis` (renumbered to axis 1) plus photometric/provenance keys.
+SPECSYS/RESTFRQ/VELREF/ALTRVAL/ALTRPIX/ZSOURCE are copied as-is when present.
+Appends `HISTORY MANTA region_spectrum axis=… npix=…`.
+"""
+function fits_header_for_region_spectrum(src, axis::Integer, npix::Integer;
+                                         source_id::AbstractString = "")
+    src === nothing && return nothing
+    axis in (1, 2, 3) || throw(ArgumentError("axis must be 1, 2, or 3"))
+    dropped = filter(!=(axis), (1, 2, 3))
+    ks, vs, cs = _copy_passthrough_header(src; drop_axes = (dropped[1], dropped[2]))
+    _renumber_axes!(ks, Dict(axis => 1))
+    msg = "MANTA region_spectrum axis=$(axis) npix=$(npix)"
+    isempty(source_id) || (msg *= " source=$(source_id)")
+    _set_history!(ks, vs, cs, msg)
+    return FITSIO.FITSHeader(ks, vs, cs)
+end
+
+"""
+    fits_header_for_filtered_cube(src, axis, sigma; source_id="") -> Union{Nothing,FITSHeader}
+
+Build a 3D `FITSHeader` for a per-slice Gaussian-filtered cube. WCS and
+provenance keys are kept; only `HISTORY MANTA filtered axis=… sigma=…` is
+appended.
+"""
+function fits_header_for_filtered_cube(src, axis::Integer, sigma::Real;
+                                       source_id::AbstractString = "")
+    src === nothing && return nothing
+    axis in (1, 2, 3) || throw(ArgumentError("axis must be 1, 2, or 3"))
+    ks, vs, cs = _copy_passthrough_header(src)
+    msg = "MANTA filtered axis=$(axis) sigma=$(sigma)"
+    isempty(source_id) || (msg *= " source=$(source_id)")
+    _set_history!(ks, vs, cs, msg)
+    return FITSIO.FITSHeader(ks, vs, cs)
 end
 
 ############################
