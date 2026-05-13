@@ -600,15 +600,13 @@ function _view_cube(
     rowgap!(ps_header, compact_layout ? 6 : 8)
     ps_ui_blocks = Any[]
     track_ps!(block) = (push!(ps_ui_blocks, block); block)
-    track_ps!(Label(ps_header[1, 1]; text = "Mode", halign = :right, fontsize = 12, color = ui_text_muted))
-    ps_mode_menu = track_ps!(Menu(ps_header[1, 2]; options = ["2D", "1D"], prompt = "2D", width = 66))
-    track_ps!(Label(ps_header[1, 3]; text = "Source", halign = :right, fontsize = 12, color = ui_text_muted))
-    ps_src_menu = track_ps!(Menu(ps_header[1, 4]; options = ["zoom", "full"], prompt = "zoom", width = 76))
-    track_ps!(Label(ps_header[1, 5]; text = "Window", halign = :right, fontsize = 12, color = ui_text_muted))
-    ps_win_menu = track_ps!(Menu(ps_header[1, 6]; options = ["Hann", "Hamming", "None"], prompt = "Hann", width = 82))
-    track_ps!(Label(ps_header[1, 7]; text = "Units", halign = :right, fontsize = 12, color = ui_text_muted))
-    ps_unit_menu = track_ps!(Menu(ps_header[1, 8]; options = ["pixel", "physical"], prompt = "pixel", width = 76))
-    ps_refresh_btn = track_ps!(Button(ps_header[1, 9]; label = "Refresh", width = 76, height = 28))
+    track_ps!(Label(ps_header[1, 1]; text = "Source", halign = :right, fontsize = 12, color = ui_text_muted))
+    ps_src_menu = track_ps!(Menu(ps_header[1, 2]; options = ["zoom", "full"], prompt = "zoom", width = 76))
+    track_ps!(Label(ps_header[1, 3]; text = "Window", halign = :right, fontsize = 12, color = ui_text_muted))
+    ps_win_menu = track_ps!(Menu(ps_header[1, 4]; options = ["Hann", "Hamming", "None"], prompt = "Hann", width = 82))
+    track_ps!(Label(ps_header[1, 5]; text = "Units", halign = :right, fontsize = 12, color = ui_text_muted))
+    ps_unit_menu = track_ps!(Menu(ps_header[1, 6]; options = ["pixel", "physical"], prompt = "pixel", width = 76))
+    ps_refresh_btn = track_ps!(Button(ps_header[1, 7]; label = "Refresh", width = 76, height = 28))
 
     ps_pad_chk = track_ps!(Checkbox(ps_header[2, 1]))
     track_ps!(Label(ps_header[2, 2]; text = "Pad", halign = :left, fontsize = 12, color = ui_text))
@@ -624,10 +622,12 @@ function _view_cube(
 
     ps_plot_grid = ps_layout[2, 1] = GridLayout(; halign = :center, valign = :top)
     colgap!(ps_plot_grid, -8)
+    rowgap!(ps_plot_grid, compact_layout ? 6 : 12)
     rowsize!(ps_layout, 1, Fixed(ps_header_height))
     rowsize!(ps_layout, 2, Relative(1))
-    colsize!(ps_plot_grid, 1, Relative(1))
-    rowsize!(ps_plot_grid, 1, Relative(1))
+    colsize!(ps_plot_grid, 1, Auto())
+    rowsize!(ps_plot_grid, 1, Auto())
+    rowsize!(ps_plot_grid, 2, Auto())
 
     # Controls
     controls_grid = main_grid[2, 1:2] = GridLayout(; alignmode = Outside())
@@ -827,7 +827,6 @@ function _view_cube(
     style_menu!(img_scale_menu)
     style_menu!(spec_scale_menu)
     style_menu!(cmap_menu)
-    style_menu!(ps_mode_menu)
     style_menu!(ps_src_menu)
     style_menu!(ps_win_menu)
     style_menu!(ps_unit_menu)
@@ -910,7 +909,7 @@ function _view_cube(
             btn.fontsize[] = 13
             btn.padding[] = (9, 9, 5, 5)
         end
-        for menu in (img_scale_menu, spec_scale_menu, cmap_menu, ps_mode_menu, ps_src_menu, ps_win_menu,
+        for menu in (img_scale_menu, spec_scale_menu, cmap_menu, ps_src_menu, ps_win_menu,
                      ps_unit_menu, fmt_menu, compare_mode_menu, axis_menu, region_mode_menu, hist_mode_menu,
                      moment_menu, fits_product_menu)
             menu.height[] = 30
@@ -1819,7 +1818,6 @@ function _view_cube(
     end
 
     # ---------- Embedded power-spectrum layout ----------
-    ps_layout_mode = Observable(:two_d)    # :two_d | :one_d
     ps_layout_src = Observable(:zoom)      # :zoom | :full
     ps_layout_window = Observable(:hann)   # :hann | :hamming | :none
     ps_layout_pad = Observable(false)
@@ -1935,96 +1933,98 @@ function _view_cube(
                   apodized = res.apodized, f_sky = res.f_sky,
                   k_phys = use_phys, src = src_label)
 
-        if ps_layout_mode[] === :two_d
-            pmax = maximum(P2d)
-            floor_val = max(eps(Float64), pmax * 1e-12)
-            vis = log10.(max.(P2d, floor_val))
-            ax = Axis(
-                ps_plot_grid[1, 1];
-                title = latexstring("\\text{2D power spectrum (log10) — ", latex_safe(src_label), "}"),
-                xlabel = use_phys ?
-                    latexstring("k_x\\;(", latex_safe(k_unit_lbl), ")") :
-                    L"k_x\;\text{(cycles/pixel)}",
-                ylabel = use_phys ?
-                    latexstring("k_y\\;(", latex_safe(k_unit_lbl), ")") :
-                    L"k_y\;\text{(cycles/pixel)}",
-                aspect = DataAspect(),
-                width = ps_axis_size,
-                height = ps_axis_size,
-                halign = :center,
-                valign = :top,
-                xtickformat = latex_tick_formatter,
-                ytickformat = latex_tick_formatter,
-            )
-            kx = collect(Float32, (-nx / 2):(nx / 2 - 1)) ./ Float32(nx)
-            ky = collect(Float32, (-ny / 2):(ny / 2 - 1)) ./ Float32(ny)
-            if use_phys
-                kx ./= Float32(dx)
-                ky ./= Float32(dy)
-            end
-            hm_ps = heatmap!(ax, kx, ky, vis; colormap = cm_obs[])
-            cb = Colorbar(
-                ps_plot_grid[1, 2],
-                hm_ps;
-                label = L"\log_{10}|F|^2",
-                width = 18,
-                height = _axis_render_height(ax),
-                tellheight = false,
-                valign = :top,
-            )
-            push!(ps_layout_blocks, ax)
-            push!(ps_layout_blocks, cb)
-        else
-            radii, prof = power_spectrum_1d_radial(P2d)
-            k_cyc = radii ./ Float32(min(ny, nx))
-            k = use_phys ? Float32.(k_cyc ./ Float32(sqrt(dx * dy))) : k_cyc
-            pmax = isempty(prof) ? 1.0f0 : maximum(prof)
-            floor_val = Float32(max(eps(Float32), pmax * 1f-12))
-            p_floored = max.(prof, floor_val)
-            # log–log : on retire le DC (k = 0) et tout k ≤ 0 (cf. convention :log10).
-            pos_mask = k .> 0
-            k_pos = k[pos_mask]
-            p_pos = p_floored[pos_mask]
+        # ---- 2D power spectrum heatmap (row 1) ----
+        pmax = maximum(P2d)
+        floor_val = max(eps(Float64), pmax * 1e-12)
+        vis = log10.(max.(P2d, floor_val))
+        ax2d = Axis(
+            ps_plot_grid[1, 1];
+            title = latexstring("\\text{2D power spectrum (log10) — ", latex_safe(src_label), "}"),
+            xlabel = use_phys ?
+                latexstring("k_x\\;(", latex_safe(k_unit_lbl), ")") :
+                L"k_x\;\text{(cycles/pixel)}",
+            ylabel = use_phys ?
+                latexstring("k_y\\;(", latex_safe(k_unit_lbl), ")") :
+                L"k_y\;\text{(cycles/pixel)}",
+            aspect = DataAspect(),
+            width = ps_axis_size,
+            height = ps_axis_size,
+            halign = :center,
+            valign = :top,
+            xtickformat = latex_tick_formatter,
+            ytickformat = latex_tick_formatter,
+        )
+        kx = collect(Float32, (-nx / 2):(nx / 2 - 1)) ./ Float32(nx)
+        ky = collect(Float32, (-ny / 2):(ny / 2 - 1)) ./ Float32(ny)
+        if use_phys
+            kx ./= Float32(dx)
+            ky ./= Float32(dy)
+        end
+        hm_ps = heatmap!(ax2d, kx, ky, vis; colormap = cm_obs[])
+        cb = Colorbar(
+            ps_plot_grid[1, 2],
+            hm_ps;
+            label = L"\log_{10}|F|^2",
+            width = 18,
+            height = _axis_render_height(ax2d),
+            tellheight = false,
+            valign = :top,
+        )
+        push!(ps_layout_blocks, ax2d)
+        push!(ps_layout_blocks, cb)
 
-            ax = Axis(
-                ps_plot_grid[1, 1];
-                title = latexstring("\\text{1D radial power spectrum (log–log) — ", latex_safe(src_label), "}"),
-                xlabel = use_phys ?
-                    latexstring("k\\;(", latex_safe(k_unit_lbl), ")") :
-                    L"k\;\text{(cycles/pixel)}",
-                ylabel = L"\langle|F|^2\rangle",
-                xscale = log10,
-                yscale = log10,
-                width = ps_axis_size,
-                height = ps_axis_size,
-                halign = :center,
-                valign = :top,
-                xtickformat = latex_tick_formatter,
-            )
-            isempty(k_pos) || lines!(ax, k_pos, p_pos; color = ui_accent, linewidth = 1.8)
-            push!(ps_layout_blocks, ax)
+        # ---- 1D radial PSD (log–log) just below the heatmap ----
+        radii, prof = power_spectrum_1d_radial(P2d)
+        k_cyc = radii ./ Float32(min(ny, nx))
+        k = use_phys ? Float32.(k_cyc ./ Float32(sqrt(dx * dy))) : k_cyc
+        pmax_1d = isempty(prof) ? 1.0f0 : maximum(prof)
+        floor_val_1d = Float32(max(eps(Float32), pmax_1d * 1f-12))
+        p_floored = max.(prof, floor_val_1d)
+        # log–log : on retire le DC (k = 0) et tout k ≤ 0 (cf. convention :log10).
+        pos_mask = k .> 0
+        k_pos = k[pos_mask]
+        p_pos = p_floored[pos_mask]
 
-            if ps_layout_fit[] && length(k) >= 3
-                valid_k = filter(>(0), k)
-                auto_lo = isempty(valid_k) ? 0.0 : Float64(first(valid_k))
-                auto_hi = isempty(k) ? Inf : Float64(last(k))
-                kmin_txt = get_box_str(ps_kmin_box)
-                kmax_txt = get_box_str(ps_kmax_box)
-                kmin_v = isempty(kmin_txt) ? auto_lo : something(tryparse(Float64, kmin_txt), auto_lo)
-                kmax_v = isempty(kmax_txt) ? auto_hi : something(tryparse(Float64, kmax_txt), auto_hi)
-                slope, intercept, n_used = fit_loglog_slope(k, prof; kmin = kmin_v, kmax = kmax_v)
-                if isfinite(slope) && n_used >= 2
-                    kfit = filter(ki -> ki > 0 && ki >= kmin_v && ki <= kmax_v, k)
-                    if !isempty(kfit)
-                        yfit = Float32.(10 .^ (slope .* log10.(Float64.(kfit)) .+ intercept))
-                        lines!(ax, kfit, yfit; color = :red, linestyle = :dash, linewidth = 1.5)
-                        ps_layout_status[] = ps_layout_status_text(meta) * " • slope=$(round(slope; digits = 3)) [n=$(n_used)]"
-                        return
-                    end
+        psd_height = max(140, round(Int, ps_axis_size * 0.55))
+        ax1d = Axis(
+            ps_plot_grid[2, 1];
+            title = latexstring("\\text{1D radial power spectrum (log–log) — ", latex_safe(src_label), "}"),
+            xlabel = use_phys ?
+                latexstring("k\\;(", latex_safe(k_unit_lbl), ")") :
+                L"k\;\text{(cycles/pixel)}",
+            ylabel = L"\langle|F|^2\rangle",
+            xscale = log10,
+            yscale = log10,
+            width = ps_axis_size,
+            height = psd_height,
+            halign = :center,
+            valign = :top,
+            xtickformat = latex_tick_formatter,
+        )
+        isempty(k_pos) || lines!(ax1d, k_pos, p_pos; color = ui_accent, linewidth = 1.8)
+        push!(ps_layout_blocks, ax1d)
+
+        fit_status = ""
+        if ps_layout_fit[] && length(k) >= 3
+            valid_k = filter(>(0), k)
+            auto_lo = isempty(valid_k) ? 0.0 : Float64(first(valid_k))
+            auto_hi = isempty(k) ? Inf : Float64(last(k))
+            kmin_txt = get_box_str(ps_kmin_box)
+            kmax_txt = get_box_str(ps_kmax_box)
+            kmin_v = isempty(kmin_txt) ? auto_lo : something(tryparse(Float64, kmin_txt), auto_lo)
+            kmax_v = isempty(kmax_txt) ? auto_hi : something(tryparse(Float64, kmax_txt), auto_hi)
+            slope, intercept, n_used = fit_loglog_slope(k, prof; kmin = kmin_v, kmax = kmax_v)
+            if isfinite(slope) && n_used >= 2
+                kfit = filter(ki -> ki > 0 && ki >= kmin_v && ki <= kmax_v, k)
+                if !isempty(kfit)
+                    yfit = Float32.(10 .^ (slope .* log10.(Float64.(kfit)) .+ intercept))
+                    lines!(ax1d, kfit, yfit; color = :red, linestyle = :dash, linewidth = 1.5)
+                    fit_status = " • slope=$(round(slope; digits = 3)) [n=$(n_used)]"
                 end
             end
         end
-        ps_layout_status[] = ps_layout_status_text(meta)
+
+        ps_layout_status[] = ps_layout_status_text(meta) * fit_status
         nothing
     end
 
@@ -2036,7 +2036,7 @@ function _view_cube(
             rowsize!(spec_grid, 1, Fixed(0))
             rowsize!(spec_grid, 2, Fixed(0))
             rowsize!(spec_grid, 3, Fixed(0))
-            set_layout_contents_visible!(controls_grid, true)
+            refresh_control_mode!()
             set_block_visible!(ax_img, true)
             set_block_visible!(ax_cmp, false)
             set_block_visible!(img_colorbar, true)
@@ -2054,7 +2054,7 @@ function _view_cube(
             colsize!(main_grid, 1, Auto())
             colsize!(main_grid, 2, Auto())
             rowsize!(main_grid, 2, Fixed(controls_height))
-            set_layout_contents_visible!(controls_grid, true)
+            refresh_control_mode!()
             set_block_visible!(ax_img, true)
             set_block_visible!(ax_cmp, compare_visible[])
             set_block_visible!(img_colorbar, true)
@@ -2079,12 +2079,6 @@ function _view_cube(
 
     on(base_layout_btn.clicks) do _
         layout_mode[] = :base
-    end
-
-    on(ps_mode_menu.selection) do sel
-        sel === nothing && return
-        ps_layout_mode[] = sel == "1D" ? :one_d : :two_d
-        layout_mode[] === :power_spectrum && render_power_spectrum_layout!()
     end
 
     on(ps_src_menu.selection) do sel

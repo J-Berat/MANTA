@@ -111,6 +111,10 @@ function manta(
     v0::Real = 0.0,
     dv::Real = 1.0,
     vunit::AbstractString = "km/s",
+    # Moment-map controls (cubes & HEALPix-PPV).
+    moment_threshold::Real = 0.0,
+    moment_nsigma::Union{Nothing,Real} = nothing,
+    moment_channels::Union{Nothing,AbstractVector{<:Integer}} = nothing,
     )
     ds = load_dataset(filepath; column = column, v0 = v0, dv = dv, vunit = vunit)
 
@@ -131,7 +135,10 @@ function manta(
             spec_ylimits = spec_ylimits,
             nx = nx, ny = ny, figsize = figsize, save_dir = save_dir,
             activate_gl = activate_gl, display_fig = display_fig,
-            rgb = rgb)
+            rgb = rgb,
+            moment_threshold = moment_threshold,
+            moment_nsigma = moment_nsigma,
+            moment_channels = moment_channels)
     elseif ds isa CubeDataset
         return manta(ds;
             cmap = cmap, vmin = vmin, vmax = vmax, invert = invert,
@@ -141,7 +148,10 @@ function manta(
             hist_mode = hist_mode, hist_bins = hist_bins,
             hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
             spec_ylimits = spec_ylimits,
-            rgb = rgb)
+            rgb = rgb,
+            moment_threshold = moment_threshold,
+            moment_nsigma = moment_nsigma,
+            moment_channels = moment_channels)
     elseif ds isa ImageDataset
         return manta(ds;
             cmap = cmap, vmin = vmin, vmax = vmax, invert = invert,
@@ -610,6 +620,9 @@ function manta(
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    moment_threshold::Real = 0.0,
+    moment_nsigma::Union{Nothing,Real} = nothing,
+    moment_channels::Union{Nothing,AbstractVector{<:Integer}} = nothing,
 )
     if rgb
         return manta_healpix(as_rgb_pixels(ds.data);
@@ -624,7 +637,10 @@ function manta(
         display_fig = display_fig,
         hist_mode = hist_mode, hist_bins = hist_bins,
         hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
-        spec_ylimits = spec_ylimits)
+        spec_ylimits = spec_ylimits,
+        moment_threshold = moment_threshold,
+        moment_nsigma = moment_nsigma,
+        moment_channels = moment_channels)
 end
 
 function manta(
@@ -644,6 +660,9 @@ function manta(
     hist_xlimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     hist_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
     spec_ylimits::Union{Nothing,Tuple{<:Real,<:Real}} = nothing,
+    moment_threshold::Real = 0.0,
+    moment_nsigma::Union{Nothing,Real} = nothing,
+    moment_channels::Union{Nothing,AbstractVector{<:Integer}} = nothing,
 )
     if rgb
         return manta(as_rgb_image(ds.data);
@@ -659,7 +678,10 @@ function manta(
         settings_path = settings_path,
         hist_mode = hist_mode, hist_bins = hist_bins,
         hist_xlimits = hist_xlimits, hist_ylimits = hist_ylimits,
-        spec_ylimits = spec_ylimits)
+        spec_ylimits = spec_ylimits,
+        moment_threshold = moment_threshold,
+        moment_nsigma = moment_nsigma,
+        moment_channels = moment_channels)
 end
 
 function manta(ds::VectorDataset; kwargs...)
