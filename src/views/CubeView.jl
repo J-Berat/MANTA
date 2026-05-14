@@ -376,6 +376,8 @@ function _view_cube(
     card_gap = compact_layout ? 7 : 10
     main_row_gap = compact_layout ? 8 : 14
     plot_row_height = compact_layout ? max(320, fig_size[2] - controls_height - 8 * main_row_gap) : 0
+    # Hauteur réservée à la rangée 1 quand on stack heatmap + PSD en mode :power_spectrum.
+    ps_plot_row_height = max(360, fig_size[2] - controls_height - 2 * main_row_gap - 16)
 
     fig = Figure(size = fig_size, backgroundcolor = fig_bg)
 
@@ -1933,6 +1935,13 @@ function _view_cube(
                   apodized = res.apodized, f_sky = res.f_sky,
                   k_phys = use_phys, src = src_label)
 
+        # ---- Tailles dynamiques pour stacker dans la rangée plots ----
+        ps_inner_gap = compact_layout ? 6 : 12
+        ps_avail = max(280, ps_plot_row_height - ps_header_height - 16)
+        heatmap_box_h = clamp(round(Int, ps_avail * 0.58), 200, ps_axis_size)
+        psd_box_h = max(120, ps_avail - heatmap_box_h - ps_inner_gap)
+        ps_box_w = heatmap_box_h  # heatmap carrée → PSD alignée sur la même largeur
+
         # ---- 2D power spectrum heatmap (row 1) ----
         pmax = maximum(P2d)
         floor_val = max(eps(Float64), pmax * 1e-12)
@@ -1947,8 +1956,8 @@ function _view_cube(
                 latexstring("k_y\\;(", latex_safe(k_unit_lbl), ")") :
                 L"k_y\;\text{(cycles/pixel)}",
             aspect = DataAspect(),
-            width = ps_axis_size,
-            height = ps_axis_size,
+            width = ps_box_w,
+            height = heatmap_box_h,
             halign = :center,
             valign = :top,
             xtickformat = latex_tick_formatter,
@@ -1985,7 +1994,6 @@ function _view_cube(
         k_pos = k[pos_mask]
         p_pos = p_floored[pos_mask]
 
-        psd_height = max(140, round(Int, ps_axis_size * 0.55))
         ax1d = Axis(
             ps_plot_grid[2, 1];
             title = latexstring("\\text{1D radial power spectrum (log–log) — ", latex_safe(src_label), "}"),
@@ -1995,8 +2003,8 @@ function _view_cube(
             ylabel = L"\langle|F|^2\rangle",
             xscale = log10,
             yscale = log10,
-            width = ps_axis_size,
-            height = psd_height,
+            width = ps_box_w,
+            height = psd_box_h,
             halign = :center,
             valign = :top,
             xtickformat = latex_tick_formatter,
@@ -2032,6 +2040,7 @@ function _view_cube(
         if layout_mode[] === :power_spectrum
             colsize!(main_grid, 1, Relative(1 / 2))
             colsize!(main_grid, 2, Relative(1 / 2))
+            rowsize!(main_grid, 1, Fixed(ps_plot_row_height))
             rowsize!(main_grid, 2, Fixed(controls_height))
             rowsize!(spec_grid, 1, Fixed(0))
             rowsize!(spec_grid, 2, Fixed(0))
@@ -2053,6 +2062,7 @@ function _view_cube(
             rowsize!(spec_grid, 3, Auto())
             colsize!(main_grid, 1, Auto())
             colsize!(main_grid, 2, Auto())
+            rowsize!(main_grid, 1, compact_layout ? Fixed(plot_row_height) : Auto())
             rowsize!(main_grid, 2, Fixed(controls_height))
             refresh_control_mode!()
             set_block_visible!(ax_img, true)
