@@ -620,7 +620,7 @@ function _view_cube(
 
     ps_layout_status = Observable(" ")
 
-    ps_plot_grid = ps_layout[2, 1] = GridLayout(; halign = :center, valign = :top)
+    ps_plot_grid = ps_layout[2, 1] = GridLayout(2, 2; halign = :center, valign = :top)
     colgap!(ps_plot_grid, -8)
     rowgap!(ps_plot_grid, compact_layout ? 6 : 12)
     rowsize!(ps_layout, 1, Fixed(ps_header_height))
